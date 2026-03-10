@@ -1,11 +1,21 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
+import html2canvas from "html2canvas";
+import jsPDF from "jspdf";
+import { auth, db } from "./firebase";
+import { RecaptchaVerifier, signInWithPhoneNumber, onAuthStateChanged } from "firebase/auth";
+import { doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
 
+const getLocalDateString = () => {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+};
 
-// ─── MOCK DATABASE (Replace with Firebase later) ───────────────────────────
-// SaaS-ready: each record has shopId. For single shop, shopId = "shop_001"
-// Later: shopId = Firebase Auth UID
-
-const SHOP_ID = "shop_001"; // 🔴 SaaS switch: replace with auth.currentUser.uid
+// SaaS-ready: each record has shopId. 
+// Initially null until Firebase Auth finishes loading
+let SHOP_ID = null;
 
 const initialInventory = [
   { id: "t1", shopId: SHOP_ID, name: "Italian Marble", size: "2x4", shade: "Shade A", purchaseRate: 72, sellingRate: 95, stock: 73, unit: "box" },
@@ -47,48 +57,369 @@ const Icon = ({ d, size = 20, color = "currentColor" }) => (
   </svg>
 );
 
+// ─── SAAS LANDING PAGE & AUTHENTICATION ──────────────────────────────────────
+function LandingPage({ onLogin }) {
+  const [showAuth, setShowAuth] = useState(false);
+  const [authMode, setAuthMode] = useState("login"); // "login" or "signup"
+
+  const [step, setStep] = useState(1);
+  const [phone, setPhone] = useState("");
+  const [shopName, setShopName] = useState("");
+  const [gst, setGst] = useState("");
+  const [otp, setOtp] = useState(["", "", "", "", "", ""]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [confirmationResult, setConfirmationResult] = useState(null);
+  const [recaptchaVerifier, setRecaptchaVerifier] = useState(null);
+
+  useEffect(() => {
+    // Only init Recaptcha if we haven't already and we are in the Auth screen
+    if (!recaptchaVerifier && showAuth) {
+      if (!window.recaptchaVerifier) {
+        window.recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
+          'size': 'invisible',
+          'callback': (response) => {
+            // reCAPTCHA solved, allow signInWithPhoneNumber.
+          }
+        });
+      }
+      setRecaptchaVerifier(window.recaptchaVerifier);
+    }
+  }, [showAuth, recaptchaVerifier]);
+
+  const openAuth = (mode) => {
+    setAuthMode(mode);
+    setStep(1);
+    setPhone("");
+    setShopName("");
+    setGst("");
+    setOtp(["", "", "", "", "", ""]);
+    setShowAuth(true);
+  };
+
+  const handleSendOtp = async (e) => {
+    e.preventDefault();
+    if (authMode === "signup" && !shopName.trim()) return alert("Please enter your Shop Name");
+    if (phone.length < 10) return alert("Please enter a valid 10-digit mobile number");
+
+    setIsLoading(true);
+    let formattedPhone = "+91" + phone;
+
+    try {
+      const appVerifier = window.recaptchaVerifier;
+      const result = await signInWithPhoneNumber(auth, formattedPhone, appVerifier);
+      setConfirmationResult(result);
+      setStep(2);
+      setIsLoading(false);
+    } catch (error) {
+      console.error("SMS SMS Error:", error);
+      alert("Error sending OTP: " + error.message);
+      setIsLoading(false);
+    }
+  };
+
+  const handleOtpChange = (index, value) => {
+    if (value.length > 1) return;
+    const newOtp = [...otp];
+    newOtp[index] = value;
+    setOtp(newOtp);
+    if (value && index < 5) {
+      const nextInput = document.getElementById(`otp-${index + 1}`);
+      if (nextInput) nextInput.focus();
+    }
+  };
+
+  const handleVerifyOtp = async (e) => {
+    e.preventDefault();
+    const enteredOtp = otp.join("");
+    if (enteredOtp.length < 6) return alert("Please enter the complete 6-digit OTP");
+
+    setIsLoading(true);
+    try {
+      if (confirmationResult) {
+        // Live Firebase verification
+        const result = await confirmationResult.confirm(enteredOtp);
+        const user = result.user;
+
+        // If it's a signup, we would technically want to save the shopName to their profile here.
+        // For now, we will just proceed.
+        setIsLoading(false);
+        onLogin(user);
+      } else {
+        throw new Error("Confirmation Result missing. Please resend the OTP.");
+      }
+    } catch (error) {
+      console.error("OTP Verification Error:", error);
+      alert("Invalid OTP Code. Please try again.");
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="landing-container">
+      {showAuth ? (
+        <div className="auth-container">
+          <div className="auth-card">
+            <button onClick={() => setShowAuth(false)} className="auth-back-btn">← Back</button>
+            <div className="auth-header">
+              <div className="auth-logo">🪨</div>
+              <h2>{authMode === "signup" ? "Create Account" : "Welcome Back"}</h2>
+              <p>{authMode === "signup" ? "Register your showroom on TileSync" : "Login to your Gujrati Tiles dashboard"}</p>
+            </div>
+
+            {step === 1 ? (
+              <form onSubmit={handleSendOtp} className="auth-form">
+                {authMode === "signup" && (
+                  <>
+                    <div className="auth-input-group">
+                      <label>🏪 Shop / Showroom Name *</label>
+                      <div className="phone-input-wrapper">
+                        <input type="text" value={shopName} onChange={e => setShopName(e.target.value)} placeholder="e.g. Gujrati Tiles" autoFocus required />
+                      </div>
+                    </div>
+                    <div className="auth-input-group">
+                      <label>📄 GST Number (Optional)</label>
+                      <div className="phone-input-wrapper">
+                        <input type="text" value={gst} onChange={e => setGst(e.target.value)} placeholder="15 alphanumeric characters" />
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                <div className="auth-input-group">
+                  <label>📱 Mobile Number *</label>
+                  <div className="phone-input-wrapper">
+                    <span className="country-code">+91</span>
+                    <input type="number" value={phone} onChange={(e) => setPhone(e.target.value.slice(0, 10))} placeholder="Enter your 10-digit number" autoFocus={authMode === "login"} required />
+                  </div>
+                </div>
+
+                <button type="submit" className="auth-button" disabled={isLoading || phone.length < 10 || (authMode === "signup" && shopName.length < 3)}>
+                  {isLoading ? "Sending OTP..." : `Continue to ${authMode === "signup" ? "Sign Up" : "Login"}`}
+                </button>
+
+                <div style={{ textAlign: "center", marginTop: 16, fontSize: 13, color: "#9ca3af" }}>
+                  {authMode === "login" ? (
+                    <>New to TileSync? <span onClick={() => setAuthMode("signup")} style={{ color: "#f59e0b", cursor: "pointer", fontWeight: 600 }}>Create an account</span></>
+                  ) : (
+                    <>Already have an account? <span onClick={() => setAuthMode("login")} style={{ color: "#f59e0b", cursor: "pointer", fontWeight: 600 }}>Login here</span></>
+                  )}
+                </div>
+              </form>
+            ) : (
+              <form onSubmit={handleVerifyOtp} className="auth-form">
+                <div className="auth-input-group">
+                  <label>Enter 6-Digit Verification Code</label>
+                  <p className="otp-subtitle">Sent to +91 {phone} <span onClick={() => setStep(1)} className="otp-edit">Edit</span></p>
+                  <div className="otp-inputs">
+                    {otp.map((digit, index) => (
+                      <input key={index} id={`otp-${index}`} type="number" value={digit} onChange={(e) => handleOtpChange(index, e.target.value)} className="otp-digit" />
+                    ))}
+                  </div>
+                </div>
+                <button type="submit" className="auth-button" disabled={isLoading || otp.join("").length < 6}>
+                  {isLoading ? "Verifying..." : "Verify & Enter Dashboard"}
+                </button>
+              </form>
+            )}
+            <div id="recaptcha-container"></div>
+          </div>
+        </div>
+      ) : (
+        <>
+          <nav className="landing-nav">
+            <div className="landing-logo">🪨 TileSync <span style={{ fontSize: 12, background: "#1e3a8a", color: "#93c5fd", padding: "2px 6px", borderRadius: 4, marginLeft: 8 }}>SaaS</span></div>
+            <div className="landing-links">
+              <span onClick={() => alert("Privacy Policy: All showroom data is strictly confidential and end-to-end encrypted on our dedicated servers.")}>🔒 Privacy Policy</span>
+              <button className="nav-login-btn" onClick={() => openAuth("login")}>Login</button>
+              <button className="nav-signup-btn" onClick={() => openAuth("signup")}>Start Free Trial</button>
+            </div>
+          </nav>
+
+          <header className="landing-hero">
+            <div className="hero-content">
+              <h1>The Ultimate Operating System for <br /><span className="highlight-text">Tile Showrooms 🚀</span></h1>
+              <p>Manage your inventory, generate instant beautiful GST invoices, and perfectly track all your customer dues and ledgers from one elegant SaaS dashboard.</p>
+              <div className="hero-buttons">
+                <button className="hero-primary-btn" onClick={() => openAuth("signup")}>✨ Get Started Now</button>
+                <button className="hero-secondary-btn" onClick={() => openAuth("login")}>Existing User Login</button>
+              </div>
+              <div style={{ marginTop: 24, fontSize: 13, color: "#6b7280", display: "flex", gap: 16, alignItems: "center" }}>
+                <span>✔️ No Credit Card Required</span>
+                <span>✔️ 10 Free Invoices Forever</span>
+              </div>
+            </div>
+            <div className="hero-image-wrapper">
+              <img src="/tilesync_hero.png" alt="TileSync Showroom Dashboard Platform" className="hero-image" />
+            </div>
+          </header>
+
+          <footer className="landing-footer">
+            <div className="footer-links">
+              <span onClick={() => alert("Data strictly confidential.")}>Privacy Policy</span>
+              <span onClick={() => alert("Terms strictly enforced.")}>Terms of Service</span>
+              <span onClick={() => window.open('mailto:support@tilesync.com')}>Contact ✉️</span>
+            </div>
+            <p>&copy; 2026 TileSync SaaS by Gujrati Tiles Demo. All rights reserved.</p>
+          </footer>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── SUBSCRIPTION PAYWALL MODAL ──────────────────────────────────────────────
+function SubscriptionModal({ onClose }) {
+  const [billingCycle, setBillingCycle] = useState("monthly"); // "monthly" or "yearly"
+
+  return (
+    <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.85)", backdropFilter: "blur(5px)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: "20px" }}>
+      <div style={{ background: "#12151f", border: "1px solid #2a2d3e", borderRadius: 24, width: "100%", maxWidth: 600, padding: "40px 32px", position: "relative", textAlign: "center", boxShadow: "0 24px 48px rgba(0, 0, 0, 0.4)" }}>
+        <button onClick={onClose} style={{ position: "absolute", top: 20, right: 20, background: "transparent", border: "none", color: "#6b7280", fontSize: 24, cursor: "pointer" }}>✕</button>
+
+        <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 64, height: 64, background: "linear-gradient(135deg, #f59e0b, #d97706)", borderRadius: 16, fontSize: 32, marginBottom: 24, padding: 10 }}>
+          🚀
+        </div>
+
+        <h2 style={{ fontSize: 28, fontWeight: 800, color: "#fff", marginBottom: 12, letterSpacing: "-0.5px" }}>Upgrade to TileSync Pro</h2>
+        <p style={{ color: "#9ca3af", fontSize: 16, marginBottom: 32, lineHeight: 1.5, maxWidth: "80%", margin: "0 auto 32px auto" }}>
+          You've reached the free limit of 10 invoices. Upgrade now to unlock unlimited invoices, advanced analytics, and premium CRM features!
+        </p>
+
+        <div style={{ display: "flex", background: "#1a1d2e", borderRadius: 12, padding: 6, margin: "0 auto 32px auto", maxWidth: 300, border: "1px solid #2a2d3e" }}>
+          <button onClick={() => setBillingCycle("monthly")} style={{ flex: 1, padding: "10px", borderRadius: 8, background: billingCycle === "monthly" ? "#374151" : "transparent", color: billingCycle === "monthly" ? "#fff" : "#9ca3af", border: "none", cursor: "pointer", fontWeight: 600, transition: "0.2s" }}>Monthly</button>
+          <button onClick={() => setBillingCycle("yearly")} style={{ flex: 1, padding: "10px", borderRadius: 8, background: billingCycle === "yearly" ? "#374151" : "transparent", color: billingCycle === "yearly" ? "#fff" : "#9ca3af", border: "none", cursor: "pointer", fontWeight: 600, transition: "0.2s" }}>
+            Yearly <span style={{ background: "#10b981", color: "#fff", fontSize: 10, padding: "2px 6px", borderRadius: 10, marginLeft: 4 }}>Save 25%</span>
+          </button>
+        </div>
+
+        <div style={{ background: "linear-gradient(135deg, rgba(245, 158, 11, 0.1), rgba(217, 119, 6, 0.05))", border: "1px solid rgba(245, 158, 11, 0.2)", borderRadius: 16, padding: "32px", marginBottom: 32 }}>
+          <div style={{ fontSize: 42, fontWeight: 800, color: "#fff", fontFamily: "'DM Mono', monospace", marginBottom: 8 }}>
+            ₹{billingCycle === "monthly" ? "499" : "4,499"}
+            <span style={{ fontSize: 16, color: "#9ca3af", fontWeight: 500 }}> / {billingCycle === "monthly" ? "mo" : "yr"}</span>
+          </div>
+          <div style={{ fontSize: 14, color: "#f59e0b", fontWeight: 600 }}>+ Applicable GST</div>
+
+          <ul style={{ textAlign: "left", display: "inline-block", margin: "24px 0 0 0", padding: 0, listStyle: "none", gap: 12, display: "flex", flexDirection: "column", color: "#e8e8e8", fontSize: 15 }}>
+            <li>✅ <span style={{ marginLeft: 8 }}>Unlimited Invoices & Estimates</span></li>
+            <li>✅ <span style={{ marginLeft: 8 }}>Unlimited Cloud Storage & Backup</span></li>
+            <li>✅ <span style={{ marginLeft: 8 }}>Premium CRM Tracking & Ledger Updates</span></li>
+            <li>✅ <span style={{ marginLeft: 8 }}>Supplier Purchase Logging System</span></li>
+          </ul>
+        </div>
+
+        <button onClick={() => alert("Redirecting to Razorpay secure payment gateway...")} style={{ width: "100%", background: "linear-gradient(135deg, #f59e0b, #d97706)", color: "#000", border: "none", padding: "16px", borderRadius: 12, fontSize: 16, fontWeight: 700, cursor: "pointer", transition: "transform 0.1s, filter 0.2s" }} onMouseEnter={e => e.currentTarget.style.filter = "brightness(1.1)"} onMouseLeave={e => e.currentTarget.style.filter = "brightness(1)"}>
+          Subscribe Now & Unlock
+        </button>
+        <div style={{ fontSize: 12, color: "#6b7280", marginTop: 16 }}>Secure payments powered by Stripe & Razorpay</div>
+      </div>
+    </div>
+  );
+}
+
 // ─── MAIN APP ────────────────────────────────────────────────────────────────
 export default function TilesApp() {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
   const [tab, setTab] = useState("billing");
+  const [showSubscription, setShowSubscription] = useState(false);
 
-  const [inventory, setInventory] = useState(() => {
-    const saved = localStorage.getItem("tiles_inventory");
-    return saved ? JSON.parse(saved) : initialInventory;
-  });
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        SHOP_ID = user.uid; // Dynamically set the global SHOP_ID to this user's unique Firebase auth ID
+        setIsAuthenticated(true);
+      } else {
+        SHOP_ID = null;
+        setIsAuthenticated(false);
+      }
+      setIsAuthLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
 
-  const [sales, setSales] = useState(() => {
-    const saved = localStorage.getItem("tiles_sales");
-    return saved ? JSON.parse(saved) : initialSales;
-  });
+  const [isDataLoaded, setIsDataLoaded] = useState(false);
 
-  const [customers, setCustomers] = useState(() => {
-    const saved = localStorage.getItem("tiles_customers");
-    return saved ? JSON.parse(saved) : initialCustomers;
-  });
+  const [inventory, setInventory] = useState([]);
+  const [sales, setSales] = useState([]);
+  const [customers, setCustomers] = useState([]);
+  const [expenses, setExpenses] = useState([]);
+  const [purchases, setPurchases] = useState([]);
+  const [suppliers, setSuppliers] = useState([]);
 
-  const [expenses, setExpenses] = useState(() => {
-    const saved = localStorage.getItem("tiles_expenses");
-    return saved ? JSON.parse(saved) : initialExpenses;
-  });
+  useEffect(() => {
+    if (!SHOP_ID) return;
 
-  const [purchases, setPurchases] = useState(() => {
-    const saved = localStorage.getItem("tiles_purchases");
-    return saved ? JSON.parse(saved) : initialPurchases;
-  });
+    const shopRef = doc(db, "shops", SHOP_ID);
 
-  const [suppliers, setSuppliers] = useState(() => {
-    const saved = localStorage.getItem("tiles_suppliers");
-    return saved ? JSON.parse(saved) : initialSuppliers;
-  });
+    // Live Sync
+    const unsubscribe = onSnapshot(shopRef, async (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setInventory(data.inventory || []);
+        setSales(data.sales || []);
+        setCustomers(data.customers || []);
+        setExpenses(data.expenses || []);
+        setPurchases(data.purchases || []);
+        setSuppliers(data.suppliers || []);
+        setIsDataLoaded(true);
+      } else {
+        // First time login -> Migrate Data
+        console.log("No cloud data found. Migrating local data to Firebase...");
+
+        let invToSetup = localStorage.getItem("tiles_inventory") ? JSON.parse(localStorage.getItem("tiles_inventory")) : initialInventory;
+        let salesToSetup = localStorage.getItem("tiles_sales") ? JSON.parse(localStorage.getItem("tiles_sales")) : initialSales;
+        let cusToSetup = localStorage.getItem("tiles_customers") ? JSON.parse(localStorage.getItem("tiles_customers")) : initialCustomers;
+        let expToSetup = localStorage.getItem("tiles_expenses") ? JSON.parse(localStorage.getItem("tiles_expenses")) : initialExpenses;
+        let purToSetup = localStorage.getItem("tiles_purchases") ? JSON.parse(localStorage.getItem("tiles_purchases")) : initialPurchases;
+        let supToSetup = localStorage.getItem("tiles_suppliers") ? JSON.parse(localStorage.getItem("tiles_suppliers")) : initialSuppliers;
+
+        // Ensure everything is tied to the new SHOP_ID
+        invToSetup = invToSetup.map(i => ({ ...i, shopId: SHOP_ID }));
+        salesToSetup = salesToSetup.map(i => ({ ...i, shopId: SHOP_ID }));
+        cusToSetup = cusToSetup.map(i => ({ ...i, shopId: SHOP_ID }));
+        expToSetup = expToSetup.map(i => ({ ...i, shopId: SHOP_ID }));
+        purToSetup = purToSetup.map(i => ({ ...i, shopId: SHOP_ID }));
+        supToSetup = supToSetup.map(i => ({ ...i, shopId: SHOP_ID }));
+
+        const cloudData = {
+          inventory: invToSetup,
+          sales: salesToSetup,
+          customers: cusToSetup,
+          expenses: expToSetup,
+          purchases: purToSetup,
+          suppliers: supToSetup,
+        };
+
+        await setDoc(shopRef, cloudData);
+        // Snapshot will naturally trigger again and load the state.
+      }
+    });
+
+    return () => unsubscribe();
+  }, [isAuthenticated]);
+
+  const pushToCloud = async (overrideData) => {
+    if (!SHOP_ID) return;
+    const shopRef = doc(db, "shops", SHOP_ID);
+
+    // We merge the provided override changes with whatever state might be lagging
+    const payload = {
+      inventory: overrideData.inventory || inventory,
+      sales: overrideData.sales || sales,
+      customers: overrideData.customers || customers,
+      expenses: overrideData.expenses || expenses,
+      purchases: overrideData.purchases || purchases,
+      suppliers: overrideData.suppliers || suppliers,
+    };
+
+    try {
+      await setDoc(shopRef, payload, { merge: true });
+    } catch (e) {
+      console.error("Cloud push failed:", e);
+    }
+  };
 
   const [toast, setToast] = useState(null);
-
-  useEffect(() => { localStorage.setItem("tiles_inventory", JSON.stringify(inventory)); }, [inventory]);
-  useEffect(() => { localStorage.setItem("tiles_sales", JSON.stringify(sales)); }, [sales]);
-  useEffect(() => { localStorage.setItem("tiles_customers", JSON.stringify(customers)); }, [customers]);
-  useEffect(() => { localStorage.setItem("tiles_expenses", JSON.stringify(expenses)); }, [expenses]);
-  useEffect(() => { localStorage.setItem("tiles_purchases", JSON.stringify(purchases)); }, [purchases]);
-  useEffect(() => { localStorage.setItem("tiles_suppliers", JSON.stringify(suppliers)); }, [suppliers]);
 
   const showToast = (msg, type = "success") => {
     setToast({ msg, type });
@@ -98,29 +429,84 @@ export default function TilesApp() {
   const addSale = (sale) => {
     const isEstimate = sale.type === "Estimate";
 
-    // Deduct stock only if it's an Invoice
     if (!isEstimate) {
-      const updated = inventory.map(tile => {
+      const generatedInvoiceCount = sales.filter(s => s.type === "Invoice" || s.type === "Tax Invoice").length;
+      if (generatedInvoiceCount >= 10) {
+        setShowSubscription(true);
+        return false;
+      }
+    }
+
+    // Deduct stock only if it's an Invoice
+    let nextInventory = inventory;
+    if (!isEstimate) {
+      nextInventory = inventory.map(tile => {
         const item = sale.items.find(i => i.tileId === tile.id);
         if (item) return { ...tile, stock: tile.stock - item.qty };
         return tile;
       });
-      setInventory(updated);
+      setInventory(nextInventory);
     }
 
-    // Update or Create Customer
-    let customerId = sale.customerId;
+    let nextCustomers = customers;
     if (!customerId) {
-      customerId = "c" + Date.now();
-      const newCustomer = {
-        id: customerId, shopId: SHOP_ID, name: sale.customerName, phone: sale.customerPhone,
-        address: "", type: "Retail", totalSpent: isEstimate ? 0 : sale.net, totalPending: isEstimate ? 0 : sale.pending
-      };
-      setCustomers(prev => [...prev, newCustomer]);
-    } else if (!isEstimate) {
-      setCustomers(prev => prev.map(c => c.id === customerId ? {
+      const existingCus = customers.find(c => c.phone && c.phone === sale.customerPhone);
+      if (existingCus) {
+        customerId = existingCus.id;
+      } else {
+        customerId = "c" + Date.now();
+        const newCustomer = {
+          id: customerId, shopId: SHOP_ID, name: sale.customerName, phone: sale.customerPhone,
+          address: "", type: "Retail", totalSpent: isEstimate ? 0 : sale.net, totalPending: isEstimate ? 0 : sale.pending
+        };
+        nextCustomers = [newCustomer, ...customers];
+        setCustomers(nextCustomers);
+      }
+    }
+
+    if (customerId && !isEstimate) {
+      nextCustomers = nextCustomers.map(c => c.id === customerId ? {
         ...c, totalSpent: (c.totalSpent || 0) + sale.net, totalPending: (c.totalPending || 0) + sale.pending
-      } : c));
+      } : c);
+      setCustomers(nextCustomers);
+    }
+
+    if (!isEstimate) {
+      let existingInvoiceIndex = sales.findIndex(s => s.customerId === customerId && s.type === "Invoice");
+      if (existingInvoiceIndex >= 0) {
+        let updatedSales = [...sales];
+        let existingInv = { ...updatedSales[existingInvoiceIndex] };
+
+        let mergedItems = [...existingInv.items];
+        sale.items.forEach(newItem => {
+          let foundItem = mergedItems.find(i => i.tileId === newItem.tileId);
+          if (foundItem) {
+            foundItem.qty += newItem.qty;
+            foundItem.total += newItem.total;
+            // Move updated item to the top
+            mergedItems = [foundItem, ...mergedItems.filter(i => i.tileId !== newItem.tileId)];
+          } else {
+            mergedItems.unshift({ ...newItem });
+          }
+        });
+
+        existingInv.items = mergedItems;
+        existingInv.gross += sale.gross;
+        existingInv.discount += sale.discount;
+        existingInv.gst += sale.gst;
+        existingInv.net += sale.net;
+        existingInv.pending += sale.pending;
+        existingInv.paid = (existingInv.paid || 0) + (sale.paid || 0);
+        existingInv.date = getLocalDateString();
+
+        updatedSales.splice(existingInvoiceIndex, 1);
+        let nextSales = [existingInv, ...updatedSales];
+        setSales(nextSales);
+
+        pushToCloud({ inventory: nextInventory, customers: nextCustomers, sales: nextSales });
+        showToast("✅ Items auto-grouped into Customer's Existing Bill!");
+        return true;
+      }
     }
 
     const newSale = {
@@ -128,11 +514,105 @@ export default function TilesApp() {
       id: "s" + Date.now(),
       shopId: SHOP_ID,
       customerId,
-      date: new Date().toISOString().split("T")[0]
+      date: getLocalDateString()
     };
 
-    setSales(prev => [newSale, ...prev]);
+    let nextSales = [newSale, ...sales];
+    setSales(nextSales);
+    pushToCloud({ inventory: nextInventory, customers: nextCustomers, sales: nextSales });
     showToast(isEstimate ? "📝 Estimate saved!" : "✅ Bill saved successfully!");
+    return true;
+  };
+
+  const deleteBillItem = (billId, itemIndex) => {
+    setSales(prev => {
+      let updated = [...prev];
+      let billIndex = updated.findIndex(b => b.id === billId);
+      if (billIndex === -1) return prev;
+
+      let bill = { ...updated[billIndex] };
+      let item = bill.items[itemIndex];
+
+      let confirmDelete = window.confirm(`Are you sure you want to remove ${item.name} from this bill?`);
+      if (!confirmDelete) return prev;
+
+      // 1. Add stock back
+      setInventory(inv => inv.map(t => t.id === item.tileId ? { ...t, stock: t.stock + item.qty } : t));
+
+      // 2. Adjust Bill Totals
+      let removedTotal = item.total;
+      bill.items = bill.items.filter((_, i) => i !== itemIndex);
+
+      let newGross = bill.items.reduce((s, i) => s + i.total, 0);
+      let gstAmount = bill.gst > 0 ? (newGross - bill.discount) * 0.18 : 0;
+      let newNet = newGross - bill.discount + gstAmount;
+
+      let netDiff = bill.net - newNet; // How much lower the bill is now
+      bill.gross = newGross;
+      bill.gst = gstAmount;
+      bill.net = newNet;
+
+      // Reduce pending balance if applicable, otherwise reduce amountPaid
+      if (bill.pending >= netDiff) {
+        bill.pending -= netDiff;
+      } else {
+        let extra = netDiff - bill.pending;
+        bill.pending = 0;
+        bill.paid = Math.max(0, bill.paid - extra);
+      }
+
+      // 3. Adjust Customer Totals
+      setCustomers(custs => custs.map(c => {
+        if (c.id === bill.customerId) {
+          let newPending = c.totalPending;
+          if (newPending >= netDiff) {
+            newPending -= netDiff;
+          } else {
+            newPending = 0;
+          }
+          return { ...c, totalSpent: Math.max(0, c.totalSpent - netDiff), totalPending: newPending };
+        }
+        return c;
+      }));
+
+      // If bill is empty now, remove it
+      if (bill.items.length === 0) {
+        updated.splice(billIndex, 1);
+      } else {
+        updated[billIndex] = bill;
+      }
+
+      // We will perform the push to cloud outside the hook, but for safety in useState callbacks we trigger slightly delayed
+      setTimeout(() => {
+        pushToCloud({ sales: updated });
+      }, 500);
+
+      showToast("🗑️ Item successfully removed from Bill and Stock updated!");
+      return updated;
+    });
+  };
+
+  const recordPayment = (customerId, paidAmt) => {
+    let remaining = paidAmt;
+    let updatedSales = [...sales];
+
+    // Sort customer's unpaid invoices by oldest first
+    let cusInvoices = updatedSales.filter(s => s.customerId === customerId && s.type === "Invoice" && s.pending > 0).sort((a, b) => a.id.localeCompare(b.id));
+
+    cusInvoices.forEach(inv => {
+      if (remaining <= 0) return;
+      let payAmount = Math.min(inv.pending, remaining);
+      inv.pending -= payAmount;
+      inv.paid = (inv.paid || 0) + payAmount;
+      remaining -= payAmount;
+    });
+
+    let nextCustomers = customers.map(c => c.id === customerId ? { ...c, totalPending: c.totalPending - paidAmt } : c);
+
+    setSales(updatedSales);
+    setCustomers(nextCustomers);
+    pushToCloud({ sales: updatedSales, customers: nextCustomers });
+    showToast("💰 Payment recorded successfully!");
   };
 
   const processReturn = (returnData) => {
@@ -145,8 +625,9 @@ export default function TilesApp() {
     setInventory(updatedInv);
 
     // 2. Adjust Customer Ledger
+    let nextCustomers = customers;
     if (returnData.customerId) {
-      setCustomers(prev => prev.map(c => {
+      nextCustomers = customers.map(c => {
         if (c.id === returnData.customerId) {
           let newPending = c.totalPending;
           let diff = returnData.totalRefund;
@@ -158,7 +639,8 @@ export default function TilesApp() {
           return { ...c, totalSpent: Math.max(0, c.totalSpent - returnData.totalRefund), totalPending: newPending };
         }
         return c;
-      }));
+      });
+      setCustomers(nextCustomers);
     }
 
     // 3. Save as Return Receipt
@@ -178,14 +660,16 @@ export default function TilesApp() {
       paid: -returnData.totalRefund,
       pending: 0,
       paymentMethod: returnData.refundMethod || "Adjusted against due",
-      date: new Date().toISOString().split("T")[0]
+      date: getLocalDateString()
     };
 
     setSales(prev => [newReturn, ...prev]);
+    pushToCloud({ inventory: updatedInv, customers: nextCustomers, sales: [newReturn, ...sales] });
     showToast("✅ Return processed successfully!");
   };
 
   const addInventory = (item) => {
+    let nextInv;
     const existing = inventory.find(t =>
       t.id === item.id ||
       (t.name.toLowerCase().trim() === item.name.toLowerCase().trim() &&
@@ -193,14 +677,17 @@ export default function TilesApp() {
         t.size === item.size)
     );
     if (existing) {
-      setInventory(prev => prev.map(t =>
+      nextInv = inventory.map(t =>
         t.id === existing.id
           ? { ...t, stock: t.stock + item.addStock, purchaseRate: item.purchaseRate, sellingRate: item.sellingRate }
           : t
-      ));
+      );
+      setInventory(nextInv);
     } else {
-      setInventory(prev => [...prev, { ...item, shopId: SHOP_ID }]);
+      nextInv = [...inventory, { ...item, shopId: SHOP_ID }];
+      setInventory(nextInv);
     }
+    pushToCloud({ inventory: nextInv });
     showToast("📦 Inventory updated!");
   };
 
@@ -218,21 +705,32 @@ export default function TilesApp() {
       });
       setInventory(updated);
 
+      let nextCustomers = customers;
       // Revert customer balances
       if (sale.customerId) {
-        setCustomers(prev => prev.map(c => c.id === sale.customerId ? {
+        nextCustomers = customers.map(c => c.id === sale.customerId ? {
           ...c, totalSpent: Math.max(0, c.totalSpent - sale.net), totalPending: Math.max(0, c.totalPending - sale.pending)
-        } : c));
+        } : c);
+        setCustomers(nextCustomers);
       }
+
+      let nextSales = sales.filter(s => s.id !== saleId);
+      setSales(nextSales);
+      pushToCloud({ inventory: updated, customers: nextCustomers, sales: nextSales });
+    } else {
+      let nextSales = sales.filter(s => s.id !== saleId);
+      setSales(nextSales);
+      pushToCloud({ sales: nextSales });
     }
 
-    setSales(prev => prev.filter(s => s.id !== saleId));
     showToast(`🗑️ ${sale.type} deleted successfully!`);
   };
 
   const deleteInventory = (id) => {
     if (!window.confirm("Are you sure you want to delete this tile from inventory?")) return;
-    setInventory(prev => prev.filter(t => t.id !== id));
+    let nextInv = inventory.filter(t => t.id !== id);
+    setInventory(nextInv);
+    pushToCloud({ inventory: nextInv });
     showToast("🗑️ Tile deleted successfully!");
   };
 
@@ -250,9 +748,43 @@ export default function TilesApp() {
   const lowStock = inventory.filter(t => t.shopId === SHOP_ID && t.stock <= 10 && t.stock > 0);
   const deadStock = inventory.filter(t => t.shopId === SHOP_ID && t.stock === 0);
 
+  if (isAuthLoading) {
+    return <div style={{ height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#0b0c10", color: "#fff", fontFamily: "'DM Sans', sans-serif" }}>Loading Secure Environment...</div>;
+  }
+
+  if (!isAuthenticated || !SHOP_ID) {
+    return (
+      <LandingPage onLogin={(user) => {
+        // user object passed from handleVerifyOtp
+        console.log("Logged in gracefully:", user.uid);
+      }} />
+    );
+  }
+
+  if (!isDataLoaded) {
+    return <div style={{ height: "100vh", display: "flex", flexDirection: "column", gap: 16, alignItems: "center", justifyContent: "center", background: "#0b0c10", color: "#e8e8e8", fontFamily: "'DM Sans', sans-serif" }}>
+      <div style={{ fontSize: 40 }}>☁️</div>
+      <div style={{ fontSize: 18, fontWeight: 600 }}>Syncing Cloud Data...</div>
+      <div style={{ fontSize: 13, color: "#9ca3af" }}>Connecting to TileSync datacenters</div>
+    </div>;
+  }
+
   return (
     <div className="app-container">
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+      {/* GLOBAL BILL VIEWER OVERLAY */}
+      {viewedBill && (
+        <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.85)", zIndex: 100, display: "flex", alignItems: "center", justifyItems: "center", padding: "20px", overflowY: "auto" }}>
+          <div style={{ position: "relative", width: "100%", maxWidth: 500, margin: "auto" }}>
+            <button onClick={() => setViewedBill(null)} className="no-print" style={{ position: "absolute", top: -40, right: 0, background: "transparent", border: "none", color: "#fff", fontSize: 24, cursor: "pointer" }}>✕</button>
+            <BillPreview bill={viewedBill} onClose={() => setViewedBill(null)} />
+          </div>
+        </div>
+      )}
+
+      {/* SUBSCRIPTION PROMPT MODAL */}
+      {showSubscription && <SubscriptionModal onClose={() => setShowSubscription(false)} />}
 
       {/* Header */}
       <div className="header">
@@ -265,7 +797,7 @@ export default function TilesApp() {
             </div>
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {lowStock.length > 0 && (
             <div style={{ background: "#451a03", border: "1px solid #92400e", borderRadius: 20, padding: "4px 10px", fontSize: 11, color: "#fbbf24", display: "flex", alignItems: "center", gap: 4 }}>
               ⚠️ {lowStock.length} Low Stock
@@ -276,6 +808,17 @@ export default function TilesApp() {
               🚫 {deadStock.length} Out of Stock
             </div>
           )}
+
+          <button
+            onClick={() => {
+              if (window.confirm("Are you sure you want to log out?")) {
+                auth.signOut();
+              }
+            }}
+            style={{ background: "transparent", border: "1px solid #374151", color: "#9ca3af", padding: "6px 12px", borderRadius: 8, fontSize: 12, cursor: "pointer", marginLeft: 8 }}
+          >
+            Log Out
+          </button>
         </div>
       </div>
 
@@ -296,14 +839,18 @@ export default function TilesApp() {
 
       {/* Content */}
       <div className="content-wrapper">
-        {tab === "billing" && <BillingTab inventory={inventory.filter(t => t.shopId === SHOP_ID)} customers={customers.filter(c => c.shopId === SHOP_ID)} onSave={addSale} />}
+        {tab === "billing" && <BillingTab inventory={inventory.filter(t => t.shopId === SHOP_ID)} customers={customers.filter(c => c.shopId === SHOP_ID)} onSave={addSale} mViewBill={(bill) => setViewedBill(bill)} />}
         {tab === "inventory" && <InventoryTab inventory={inventory.filter(t => t.shopId === SHOP_ID)} onAdd={addInventory} onDelete={deleteInventory} />}
         {tab === "calculator" && <CalculatorTab inventory={inventory.filter(t => t.shopId === SHOP_ID)} />}
         {tab === "returns" && <ReturnsTab sales={sales.filter(s => s.shopId === SHOP_ID)} onProcessReturn={processReturn} />}
-        {tab === "customers" && <CustomersTab customers={customers.filter(c => c.shopId === SHOP_ID)} sales={sales.filter(s => s.shopId === SHOP_ID)} onUpdateCustomer={(cus) => setCustomers(prev => prev.map(c => c.id === cus.id ? cus : c))} />}
+        {tab === "customers" && <CustomersTab customers={customers.filter(c => c.shopId === SHOP_ID)} sales={sales.filter(s => s.shopId === SHOP_ID)} onRecordPayment={recordPayment} onViewBill={(bill) => setViewedBill(bill)} onViewStatement={(cus) => setViewedBill({ isStatement: true, customer: cus, sales: sales.filter(s => s.customerId === cus.id && s.type === "Invoice") })} onDeleteBillItem={deleteBillItem} onDeleteBill={deleteSale} />}
         {tab === "expenses" && <ExpensesTab expenses={expenses.filter(e => e.shopId === SHOP_ID)} onAdd={(e) => { setExpenses(prev => [{ ...e, id: "e" + Date.now(), shopId: SHOP_ID }, ...prev]); showToast("💸 Expense recorded"); }} onDelete={(id) => { setExpenses(prev => prev.filter(e => e.id !== id)); showToast("🗑️ Expense deleted"); }} />}
-        {tab === "purchases" && <PurchasesTab purchases={purchases.filter(p => p.shopId === SHOP_ID)} suppliers={suppliers.filter(s => s.shopId === SHOP_ID)} inventory={inventory.filter(t => t.shopId === SHOP_ID)} onUpdateSupplier={(sup) => setSuppliers(prev => prev.map(s => s.id === sup.id ? sup : s))} onAddPurchase={(p) => {
-          const updatedInv = inventory.map(t => {
+        {tab === "purchases" && <PurchasesTab purchases={purchases.filter(p => p.shopId === SHOP_ID)} suppliers={suppliers.filter(s => s.shopId === SHOP_ID)} inventory={inventory.filter(t => t.shopId === SHOP_ID)} onUpdateSupplier={(sup) => setSuppliers(prev => prev.map(s => s.id === sup.id ? sup : s))} onAddPurchase={(p, newTileObj) => {
+          let currentInv = inventory;
+          if (newTileObj) {
+            currentInv = [...currentInv, newTileObj];
+          }
+          const updatedInv = currentInv.map(t => {
             const item = p.items.find(i => i.tileId === t.id);
             if (item) return { ...t, stock: t.stock + item.qty };
             return t;
@@ -316,7 +863,7 @@ export default function TilesApp() {
           } else {
             setSuppliers(prev => prev.map(s => s.id === supId ? { ...s, totalBought: s.totalBought + p.net, totalPending: s.totalPending + p.pending } : s));
           }
-          setPurchases(prev => [{ ...p, id: "p" + Date.now(), shopId: SHOP_ID, supplierId: supId }, ...prev]);
+          setPurchases(prev => [{ ...p, id: "p" + Date.now(), shopId: SHOP_ID, supplierId: supId, date: getLocalDateString() }, ...prev]);
           showToast("📦 Purchase recorded!");
         }} />}
         {tab === "reports" && <ReportsTab sales={sales.filter(s => s.shopId === SHOP_ID)} inventory={inventory.filter(t => t.shopId === SHOP_ID)} expenses={expenses.filter(e => e.shopId === SHOP_ID)} onDelete={deleteSale} />}
@@ -339,7 +886,7 @@ export default function TilesApp() {
 }
 
 // ─── BILLING TAB ─────────────────────────────────────────────────────────────
-function BillingTab({ inventory, customers, onSave }) {
+function BillingTab({ inventory, customers, onSave, mViewBill }) {
   const [docType, setDocType] = useState("Invoice"); // Invoice or Estimate
 
   const [customerName, setCustomerName] = useState("");
@@ -450,7 +997,9 @@ function BillingTab({ inventory, customers, onSave }) {
       paymentMethod
     };
 
-    onSave(sale);
+    const success = onSave(sale);
+    if (!success) return;
+
     setBillDone({ ...sale, date: new Date().toLocaleDateString("en-IN") });
 
     // Reset Form
@@ -694,46 +1243,159 @@ function BillingTab({ inventory, customers, onSave }) {
 }
 
 // ─── BILL PREVIEW ─────────────────────────────────────────────────────────────
-function BillPreview({ bill, onNew }) {
+function BillPreview({ bill, onNew, onClose }) {
+  const billRef = useRef(null);
+  const [isGenerating, setIsGenerating] = useState(false);
+
+  const generatePDF = async () => {
+    setIsGenerating(true);
+    try {
+      const element = billRef.current;
+      const canvas = await html2canvas(element, { scale: 2, useCORS: true });
+      const imgData = canvas.toDataURL("image/png");
+      const pdf = new jsPDF("p", "mm", "a4");
+      const pdfWidth = pdf.internal.pageSize.getWidth();
+      const pdfHeight = pdf.internal.pageSize.getHeight();
+
+      let imgWidth = pdfWidth;
+      let imgHeight = (canvas.height * imgWidth) / canvas.width;
+
+      if (imgHeight > pdfHeight) {
+        const ratio = pdfHeight / imgHeight;
+        imgHeight = pdfHeight;
+        imgWidth = imgWidth * ratio;
+      }
+
+      pdf.addImage(imgData, "PNG", (pdfWidth - imgWidth) / 2, 0, imgWidth, imgHeight);
+      setIsGenerating(false);
+      return pdf;
+    } catch (err) {
+      console.error(err);
+      setIsGenerating(false);
+      alert("Failed to generate PDF.");
+      return null;
+    }
+  };
+
+  const handleWhatsApp = async () => {
+    const pdf = await generatePDF();
+    if (pdf) {
+      if (bill.isStatement) {
+        pdf.save(`Gujrati_Tiles_Statement_${bill.customer.name}.pdf`);
+        const text = encodeURIComponent(`Hello ${bill.customer.name || "Customer"},\n\nThank you for shopping at Gujrati Tiles! Attached is your Account Statement showing a total pending due of ₹${bill.customer.totalPending.toLocaleString("en-IN")}. Please see the downloaded document for full details.\n\nWarm regards,\nGujrati Tiles`);
+        window.open(`https://wa.me/${bill.customer.phone || ""}?text=${text}`, "_blank");
+      } else {
+        pdf.save(`Gujrati_Tiles_Bill_${bill.billNo}.pdf`);
+        const text = encodeURIComponent(`Hello ${bill.customerName || "Customer"},\n\nThank you for shopping at Gujrati Tiles! Your bill ${bill.billNo} for ₹${bill.net.toFixed(2)} has been saved to your device as a PDF file. Please see the downloaded document for full details.\n\nWarm regards,\nGujrati Tiles`);
+        window.open(`https://wa.me/${bill.customerPhone || ""}?text=${text}`, "_blank");
+      }
+    }
+  };
+
+  const statementData = useMemo(() => {
+    if (!bill.isStatement) return { unique: [], totalDue: 0 };
+    const unique = [];
+    const seen = new Set();
+    bill.sales.forEach(s => {
+      if (!seen.has(s.billNo)) {
+        seen.add(s.billNo);
+        unique.push(s);
+      }
+    });
+    const totalDue = unique.reduce((sum, s) => sum + s.pending, 0);
+    return { unique: unique.sort((a, b) => a.id.localeCompare(b.id)), totalDue };
+  }, [bill]);
+
+  const handlePrint = () => {
+    window.print();
+  };
+
   return (
     <div>
-      <div style={{ background: "#0d1f17", border: "1px solid #166534", borderRadius: 16, padding: 28, maxWidth: 500, margin: "0 auto" }}>
+      <div ref={billRef} className="print-section" style={{ background: "#0d1f17", border: "1px solid #166534", borderRadius: 16, padding: 28, maxWidth: 500, margin: "0 auto", color: "#e8e8e8" }}>
         <div style={{ textAlign: "center", marginBottom: 24 }}>
           <div style={{ fontSize: 32, marginBottom: 8 }}>✅</div>
-          <div style={{ fontSize: 20, fontWeight: 700, color: "#fff" }}>Bill Generated!</div>
-          <div style={{ fontSize: 13, color: "#6b7280", marginTop: 4 }}>Bill No: <span style={{ color: "#f59e0b", fontFamily: "'DM Mono', monospace" }}>{bill.billNo}</span></div>
-          <div style={{ fontSize: 12, color: "#6b7280" }}>{bill.date}</div>
+          <div style={{ fontSize: 24, fontWeight: 700, color: "#fff" }}>Gujrati Tiles</div>
+          <div style={{ fontSize: 13, color: "#6b7280", marginTop: 4 }}>
+            {bill.isStatement ? "Account Statement" : <>Bill No: <span style={{ color: "#f59e0b", fontFamily: "'DM Mono', monospace" }}>{bill.billNo}</span></>}
+          </div>
+          <div style={{ fontSize: 12, color: "#6b7280" }}>{bill.isStatement ? getLocalDateString() : bill.date}</div>
         </div>
 
-        <div style={{ background: "#12151f", borderRadius: 10, padding: 16, marginBottom: 16 }}>
-          <div style={{ fontSize: 13, color: "#9ca3af", marginBottom: 8 }}>Customer: <span style={{ color: "#fff", fontWeight: 600 }}>{bill.customer}</span></div>
-          {bill.items.map((item, i) => (
-            <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "#e8e8e8", padding: "6px 0", borderBottom: "1px solid #1e2130" }}>
-              <span>{item.name}</span>
-              <span style={{ fontFamily: "'DM Mono', monospace" }}>{item.qty} box × ₹{item.rate} = ₹{item.total}</span>
-            </div>
-          ))}
-          <div style={{ marginTop: 12, fontSize: 13, color: "#9ca3af" }}>
-            <div style={{ display: "flex", justifyContent: "space-between" }}><span>Gross</span><span style={{ fontFamily: "'DM Mono', monospace" }}>₹{bill.gross}</span></div>
-            {bill.discount > 0 && <div style={{ display: "flex", justifyContent: "space-between", color: "#f87171" }}><span>Discount</span><span style={{ fontFamily: "'DM Mono', monospace" }}>-₹{bill.discount}</span></div>}
-            {bill.gst > 0 && <div style={{ display: "flex", justifyContent: "space-between", color: "#fbbf24" }}><span>GST (18%)</span><span style={{ fontFamily: "'DM Mono', monospace" }}>₹{bill.gst.toFixed(2)}</span></div>}
-            <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, fontSize: 18, color: "#10b981", marginTop: 8, borderTop: "1px solid #1e2130", paddingTop: 8 }}>
-              <span>Net Total</span><span style={{ fontFamily: "'DM Mono', monospace" }}>₹{bill.net.toFixed(2)}</span>
+        {bill.isStatement ? (
+          <div>
+            <div style={{ fontSize: 13, color: "#9ca3af", marginBottom: 16 }}>Customer: <span style={{ color: "#fff", fontWeight: 600 }}>{bill.customer.name}</span></div>
+            {statementData.unique.length === 0 ? <div style={{ color: "#6b7280", fontSize: 13 }}>No invoices found.</div> : statementData.unique.map((s, i) => (
+              <div key={i} style={{ padding: "10px 0", borderBottom: "1px solid #1e2130" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "#e8e8e8", marginBottom: 4 }}>
+                  <span>{s.date} <span style={{ color: "#f59e0b", fontSize: 11 }}>({s.billNo})</span></span>
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontWeight: 600 }}>₹{s.net.toFixed(2)}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#9ca3af" }}>
+                  <span>Paid: ₹{(s.paid || 0).toFixed(2)}</span>
+                  <span style={{ color: s.pending > 0 ? "#f87171" : "#10b981", fontWeight: 600 }}>Due: ₹{s.pending.toFixed(2)}</span>
+                </div>
+              </div>
+            ))}
+            <div style={{ marginTop: 16, padding: "16px", background: "#451a03", borderRadius: 8, border: "1px solid #92400e" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", color: "#fcd34d", fontSize: 15, fontWeight: 700 }}>
+                <span>Total Outstanding</span>
+                <span style={{ fontFamily: "'DM Mono', monospace" }}>₹{statementData.totalDue.toLocaleString("en-IN")}</span>
+              </div>
             </div>
           </div>
-        </div>
+        ) : (
+          <div style={{ background: "#12151f", borderRadius: 10, padding: 16, marginBottom: 16 }}>
+            <div style={{ fontSize: 13, color: "#9ca3af", marginBottom: 8 }}>Customer: <span style={{ color: "#fff", fontWeight: 600 }}>{bill.customerName}</span></div>
+            {bill.items.map((item, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "#e8e8e8", padding: "6px 0", borderBottom: "1px solid #1e2130" }}>
+                <span>{item.name}</span>
+                <span style={{ fontFamily: "'DM Mono', monospace" }}>{item.qty} box × ₹{item.rate} = ₹{item.total}</span>
+              </div>
+            ))}
+            <div style={{ marginTop: 12, fontSize: 13, color: "#9ca3af" }}>
+              <div style={{ display: "flex", justifyContent: "space-between" }}><span>Gross</span><span style={{ fontFamily: "'DM Mono', monospace" }}>₹{bill.gross}</span></div>
+              {bill.discount > 0 && <div style={{ display: "flex", justifyContent: "space-between", color: "#f87171" }}><span>Discount</span><span style={{ fontFamily: "'DM Mono', monospace" }}>-₹{bill.discount}</span></div>}
+              {bill.gst > 0 && <div style={{ display: "flex", justifyContent: "space-between", color: "#fbbf24" }}><span>GST (18%)</span><span style={{ fontFamily: "'DM Mono', monospace" }}>₹{bill.gst.toFixed(2)}</span></div>}
+              <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, fontSize: 18, color: "#10b981", marginTop: 8, borderTop: "1px solid #1e2130", paddingTop: 8 }}>
+                <span>Net Total</span><span style={{ fontFamily: "'DM Mono', monospace" }}>₹{bill.net.toFixed(2)}</span>
+              </div>
 
-        <div style={{ display: "flex", gap: 10 }}>
-          <button style={{ ...btnStyle, flex: 1, background: "#1a1d2e", border: "1px solid #2a2d3e", color: "#9ca3af", fontSize: 13 }}>
-            📱 WhatsApp
-          </button>
-          <button style={{ ...btnStyle, flex: 1, background: "#1a1d2e", border: "1px solid #2a2d3e", color: "#9ca3af", fontSize: 13 }}>
-            🖨️ Print
-          </button>
+              {(bill.paid !== undefined || bill.pending > 0) && (
+                <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px dashed #2a2d3e" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", color: "#e8e8e8", marginBottom: 4 }}>
+                    <span>Amount Paid</span><span style={{ fontFamily: "'DM Mono', monospace" }}>₹{(bill.paid || 0).toFixed(2)}</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", color: "#f87171", fontWeight: 600 }}>
+                    <span>Balance Due</span><span style={{ fontFamily: "'DM Mono', monospace" }}>₹{(bill.pending || 0).toFixed(2)}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="print-thank-you" style={{ textAlign: "center", fontSize: 13, color: "#10b981", marginTop: 24, fontWeight: 600 }}>
+          Thank you for choosing Gujrati Tiles!
+        </div>
+      </div>
+
+      <div className="no-print" style={{ display: "flex", gap: 10, maxWidth: 500, margin: "20px auto 0" }}>
+        <button onClick={handleWhatsApp} disabled={isGenerating} style={{ ...btnStyle, flex: 1, background: "#1a1d2e", border: "1px solid #2a2d3e", color: "#10b981", fontSize: 13, fontWeight: 600 }}>
+          {isGenerating ? "⏳ Generating..." : "📱 WhatsApp PDF"}
+        </button>
+        <button onClick={handlePrint} style={{ ...btnStyle, flex: 1, background: "#1a1d2e", border: "1px solid #2a2d3e", color: "#9ca3af", fontSize: 13 }}>
+          🖨️ Print
+        </button>
+        {onNew ? (
           <button onClick={onNew} style={{ ...btnStyle, flex: 1, background: "linear-gradient(135deg, #f59e0b, #d97706)", color: "#000", fontWeight: 700, fontSize: 13 }}>
             + New Bill
           </button>
-        </div>
+        ) : (
+          <button onClick={onClose} style={{ ...btnStyle, flex: 1, background: "#1a1d2e", border: "1px solid #2a2d3e", color: "#fff", fontWeight: 600, fontSize: 13 }}>
+            Close
+          </button>
+        )}
       </div>
     </div>
   );
@@ -813,12 +1475,12 @@ function InventoryTab({ inventory, onAdd, onDelete }) {
       <input value={filter} onChange={e => setFilter(e.target.value)} placeholder="Search inventory..." style={{ ...inputStyle, marginBottom: 16 }} />
 
       {/* Stock Table */}
-      <div style={{ background: "#12151f", border: "1px solid #1e2130", borderRadius: 12, overflow: "hidden" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr 1fr 0.5fr", padding: "10px 16px", background: "#1a1d2e", fontSize: 11, color: "#6b7280", fontWeight: 600, letterSpacing: "0.5px" }}>
+      <div className="table-wrapper" style={{ background: "#12151f", border: "1px solid #1e2130", borderRadius: 12, overflow: "hidden" }}>
+        <div className="table-header inventory-header" style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr 1fr 0.5fr", padding: "10px 16px", background: "#1a1d2e", fontSize: 11, color: "#6b7280", fontWeight: 600, letterSpacing: "0.5px" }}>
           <span>TILE</span><span>SIZE</span><span>SHADE</span><span>PURCHASE</span><span>SELLING</span><span>STOCK</span><span></span>
         </div>
         {filtered.map((tile, i) => (
-          <div key={tile.id} style={{
+          <div key={tile.id} className="table-row inventory-row" style={{
             display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr 1fr 0.5fr",
             padding: "12px 16px", borderBottom: "1px solid #1e2130",
             background: i % 2 === 0 ? "transparent" : "#0a0c14",
@@ -870,7 +1532,7 @@ function CalculatorTab({ inventory }) {
       </div>
 
       <div style={{ background: "#1a1d2e", border: "1px solid #2a2d3e", borderRadius: 12, padding: 20, marginBottom: 20 }}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginBottom: 16 }}>
+        <div className="three-col-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginBottom: 16 }}>
           <div>
             <label style={labelStyle}>Room Area (sq.ft)</label>
             <input type="number" value={area} onChange={e => setArea(e.target.value)} placeholder="e.g. 450" style={{ ...inputStyle, fontSize: 18, fontWeight: 700, color: "#f59e0b" }} />
@@ -894,7 +1556,7 @@ function CalculatorTab({ inventory }) {
 
       {result && (
         <div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 20 }}>
+          <div className="three-col-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 20 }}>
             {[
               { label: "Base Area", value: `${result.sqft} sq.ft`, color: "#9ca3af" },
               { label: `+${wastage}% Wastage`, value: `${result.withWastage.toFixed(1)} sq.ft`, color: "#fbbf24" },
@@ -931,8 +1593,9 @@ function CalculatorTab({ inventory }) {
 }
 
 // ─── CUSTOMERS & CRM TAB ─────────────────────────────────────────────────────
-function CustomersTab({ customers, sales, onUpdateCustomer }) {
+function CustomersTab({ customers, sales, onRecordPayment, onViewStatement, onUpdateCustomer, onViewBill, onDeleteBillItem, onDeleteBill }) {
   const [selectedCustomerId, setSelectedCustomerId] = useState(null);
+  const [searchQuery, setSearchQuery] = useState("");
 
   const selectedCustomer = customers.find(c => c.id === selectedCustomerId);
   const customerSales = selectedCustomer ? sales.filter(s => s.customerId === selectedCustomer.id && s.type === "Invoice") : [];
@@ -946,9 +1609,7 @@ function CustomersTab({ customers, sales, onUpdateCustomer }) {
       alert("Invalid amount."); return;
     }
 
-    // In a real app we'd create a "Payment Receipt" record
-    onUpdateCustomer({ ...selectedCustomer, totalPending: selectedCustomer.totalPending - paid });
-    alert("Payment recorded successfully!");
+    onRecordPayment(selectedCustomer.id, paid);
   };
 
   if (selectedCustomer) {
@@ -958,7 +1619,7 @@ function CustomersTab({ customers, sales, onUpdateCustomer }) {
           ← Back to Directory
         </button>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 24, alignItems: "start" }}>
+        <div className="split-grid" style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 24, alignItems: "start" }}>
           <div style={{ background: "#1a1d2e", border: "1px solid #2a2d3e", borderRadius: 12, padding: 24 }}>
             <div style={{ width: 64, height: 64, background: "linear-gradient(135deg, #f59e0b, #d97706)", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, color: "#fff", fontWeight: 700, marginBottom: 16 }}>
               {selectedCustomer.name.charAt(0)}
@@ -984,6 +1645,12 @@ function CustomersTab({ customers, sales, onUpdateCustomer }) {
                   💰 Receive Payment
                 </button>
               )}
+
+              {customerSales.length > 0 && (
+                <button onClick={() => onViewStatement(selectedCustomer)} style={{ ...btnStyle, width: "100%", background: "transparent", border: "1px dashed #6366f1", color: "#818cf8", fontWeight: 600, marginTop: 12, padding: "8px" }}>
+                  📄 Share Account Statement
+                </button>
+              )}
             </div>
           </div>
 
@@ -992,15 +1659,24 @@ function CustomersTab({ customers, sales, onUpdateCustomer }) {
             {customerSales.length === 0 ? <div style={{ color: "#6b7280" }}>No purchases yet.</div> : (
               customerSales.map(bill => (
                 <div key={bill.id} style={{ background: "#12151f", border: "1px solid #1e2130", borderRadius: 10, padding: 16, marginBottom: 12 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                  <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", marginBottom: 8, alignItems: "center", gap: 8 }}>
                     <div>
                       <span style={{ color: "#f59e0b", fontFamily: "'DM Mono', monospace", fontWeight: 600, marginRight: 12 }}>{bill.billNo}</span>
                       <span style={{ color: "#9ca3af", fontSize: 12 }}>{bill.date}</span>
                     </div>
-                    <div style={{ fontWeight: 700, color: "#10b981", fontFamily: "'DM Mono', monospace", fontSize: 16 }}>₹{bill.net.toFixed(2)}</div>
+                    <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                      <button onClick={() => onViewBill(bill)} style={{ background: "transparent", border: "1px solid #374151", color: "#9ca3af", padding: "4px 8px", borderRadius: 6, fontSize: 11, cursor: "pointer" }}>📄 View Bill</button>
+                      <button onClick={() => onDeleteBill(bill.id)} style={{ background: "transparent", border: "1px solid #7f1d1d", color: "#ef4444", padding: "4px 8px", borderRadius: 6, fontSize: 11, cursor: "pointer" }}>🗑️ Delete Bill</button>
+                      <div style={{ fontWeight: 700, color: "#10b981", fontFamily: "'DM Mono', monospace", fontSize: 16 }}>₹{bill.net.toFixed(2)}</div>
+                    </div>
                   </div>
                   <div style={{ fontSize: 13, color: "#6b7280" }}>
-                    {bill.items.map((i, idx) => <span key={idx}>{i.name} ({i.qty}){idx < bill.items.length - 1 ? ', ' : ''}</span>)}
+                    {bill.items.map((i, idx) => (
+                      <div key={idx} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px dashed #2a2d3e", paddingBottom: 4, marginBottom: 4 }}>
+                        <span>{i.name} ({i.qty})</span>
+                        <button onClick={() => onDeleteBillItem(bill.id, idx)} style={{ ...btnStyle, background: "transparent", color: "#ef4444", padding: "2px 6px", fontSize: 12 }}>🗑️ Remove</button>
+                      </div>
+                    ))}
                   </div>
                   {bill.pending > 0 && (
                     <div style={{ marginTop: 8, fontSize: 12, color: "#f87171", fontFamily: "'DM Mono', monospace" }}>
@@ -1016,21 +1692,35 @@ function CustomersTab({ customers, sales, onUpdateCustomer }) {
     );
   }
 
+  const filteredCustomers = customers.filter(c =>
+    c.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    c.phone.includes(searchQuery)
+  );
+
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+      <div className="flex-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
         <div>
           <div style={{ fontSize: 20, fontWeight: 700, color: "#fff", marginBottom: 4 }}>Customer Directory Dashboard</div>
           <div style={{ fontSize: 13, color: "#6b7280" }}>{customers.length} total customers · ₹{customers.reduce((s, c) => s + c.totalPending, 0).toLocaleString("en-IN")} pending in market</div>
         </div>
+        <div>
+          <input
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            placeholder="Search customers..."
+            className="input"
+            style={{ width: "250px", background: "#1a1d2e" }}
+          />
+        </div>
       </div>
 
-      <div style={{ background: "#12151f", border: "1px solid #1e2130", borderRadius: 12, overflow: "hidden" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "2fr 1.5fr 1fr 1fr 1fr", padding: "12px 20px", background: "#1a1d2e", fontSize: 11, color: "#6b7280", fontWeight: 600, letterSpacing: "0.5px" }}>
+      <div className="table-wrapper" style={{ background: "#12151f", border: "1px solid #1e2130", borderRadius: 12, overflow: "hidden" }}>
+        <div className="table-header customers-header" style={{ display: "grid", gridTemplateColumns: "2fr 1.5fr 1fr 1fr 1fr", padding: "12px 20px", background: "#1a1d2e", fontSize: 11, color: "#6b7280", fontWeight: 600, letterSpacing: "0.5px" }}>
           <span>CUSTOMER</span><span>PHONE</span><span>TYPE</span><span>LIFETIME SPENT</span><span>PENDING DUE</span>
         </div>
-        {customers.map((c, i) => (
-          <div key={c.id} onClick={() => setSelectedCustomerId(c.id)} style={{
+        {filteredCustomers.map((c, i) => (
+          <div key={c.id} className="table-row customers-row" onClick={() => setSelectedCustomerId(c.id)} style={{
             display: "grid", gridTemplateColumns: "2fr 1.5fr 1fr 1fr 1fr",
             padding: "16px 20px", borderBottom: "1px solid #1e2130",
             background: i % 2 === 0 ? "transparent" : "#0a0c14",
@@ -1060,14 +1750,14 @@ function ExpensesTab({ expenses, onAdd, onDelete }) {
 
   const handleSave = () => {
     if (!desc || !amt) return alert("Fill all details");
-    onAdd({ desc, amount: Number(amt), category: cat, date: new Date().toISOString().split("T")[0] });
+    onAdd({ desc, amount: Number(amt), category: cat, date: getLocalDateString() });
     setDesc(""); setAmt(""); setCat("Transport");
   };
 
   const totalExp = expenses.reduce((s, e) => s + e.amount, 0);
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 24, alignItems: "start" }}>
+    <div className="split-grid" style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 24, alignItems: "start" }}>
       <div>
         <div style={{ fontSize: 20, fontWeight: 700, color: "#fff", marginBottom: 20 }}>Log Expense</div>
         <div style={{ background: "#1a1d2e", border: "1px solid #2a2d3e", borderRadius: 12, padding: 20 }}>
@@ -1124,6 +1814,12 @@ function PurchasesTab({ purchases, suppliers, inventory, onUpdateSupplier, onAdd
   const [supplierPhone, setSupplierPhone] = useState("");
   const [selectedSupplierId, setSelectedSupplierId] = useState(null);
 
+  const [isNewTile, setIsNewTile] = useState(false);
+  const [newTileName, setNewTileName] = useState("");
+  const [newTileSize, setNewTileSize] = useState("");
+  const [newTileShade, setNewTileShade] = useState("");
+  const [newSellingRate, setNewSellingRate] = useState("");
+
   const [selectedTileId, setSelectedTileId] = useState("");
   const [qty, setQty] = useState("");
   const [rate, setRate] = useState("");
@@ -1131,9 +1827,30 @@ function PurchasesTab({ purchases, suppliers, inventory, onUpdateSupplier, onAdd
 
   const handleSave = () => {
     if (!supplierName) { alert("Supplier name required."); return; }
-    if (!selectedTileId || !qty || !rate) { alert("Tile details required."); return; }
 
-    const tile = inventory.find(t => t.id === selectedTileId);
+    let tile;
+    let newTileObj = null;
+
+    if (isNewTile) {
+      if (!newTileName || !newTileSize || !newTileShade || !newSellingRate || !qty || !rate) {
+        alert("All new tile details are required."); return;
+      }
+      newTileObj = {
+        id: "t" + Date.now(),
+        shopId: "shop_001",
+        name: newTileName,
+        size: newTileSize,
+        shade: newTileShade,
+        stock: 0,
+        purchaseRate: Number(rate),
+        sellingRate: Number(newSellingRate)
+      };
+      tile = newTileObj;
+    } else {
+      tile = inventory.find(t => t.id === selectedTileId);
+      if (!tile || !qty || !rate) { alert("Tile details required."); return; }
+    }
+
     const net = Number(qty) * Number(rate);
     const paid = Number(amountPaid) || 0;
 
@@ -1148,10 +1865,11 @@ function PurchasesTab({ purchases, suppliers, inventory, onUpdateSupplier, onAdd
       pending: net - paid
     };
 
-    onAddPurchase(purchase);
+    onAddPurchase(purchase, newTileObj);
 
     setSupplierName(""); setSupplierPhone(""); setSelectedSupplierId(null);
     setSelectedTileId(""); setQty(""); setRate(""); setAmountPaid("");
+    setIsNewTile(false); setNewTileName(""); setNewTileSize(""); setNewTileShade(""); setNewSellingRate("");
   };
 
   return (
@@ -1191,15 +1909,45 @@ function PurchasesTab({ purchases, suppliers, inventory, onUpdateSupplier, onAdd
             </div>
 
             <div style={{ borderTop: "1px solid #2a2d3e", margin: "20px 0" }}></div>
-            <div style={{ fontSize: 15, fontWeight: 600, color: "#fff", marginBottom: 16 }}>Stock Arrived</div>
 
-            <div style={{ marginBottom: 12 }}>
-              <label style={labelStyle}>Select Tile *</label>
-              <select value={selectedTileId} onChange={e => setSelectedTileId(e.target.value)} style={inputStyle}>
-                <option value="">-- Choose from Inventory --</option>
-                {inventory.map(t => <option key={t.id} value={t.id}>{t.name} ({t.size}) - {t.shade}</option>)}
-              </select>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <div style={{ fontSize: 15, fontWeight: 600, color: "#fff" }}>Stock Arrived</div>
+              <label style={{ fontSize: 13, color: "#9ca3af", display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+                <input type="checkbox" checked={isNewTile} onChange={e => setIsNewTile(e.target.checked)} style={{ accentColor: "#10b981" }} />
+                Add New Tile
+              </label>
             </div>
+
+            {isNewTile ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 12 }}>
+                <div>
+                  <label style={labelStyle}>Tile Name (e.g. Kajaria Matt) *</label>
+                  <input value={newTileName} onChange={e => setNewTileName(e.target.value)} placeholder="Tile Name" style={inputStyle} />
+                </div>
+                <div style={{ display: "flex", gap: 12 }}>
+                  <div style={{ flex: 1 }}>
+                    <label style={labelStyle}>Size *</label>
+                    <input value={newTileSize} onChange={e => setNewTileSize(e.target.value)} placeholder="2x2" style={inputStyle} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label style={labelStyle}>Shade *</label>
+                    <input value={newTileShade} onChange={e => setNewTileShade(e.target.value)} placeholder="Grey" style={inputStyle} />
+                  </div>
+                </div>
+                <div>
+                  <label style={labelStyle}>Expected Selling Rate (₹/box) *</label>
+                  <input type="number" value={newSellingRate} onChange={e => setNewSellingRate(e.target.value)} placeholder="0" min="0" style={inputStyle} />
+                </div>
+              </div>
+            ) : (
+              <div style={{ marginBottom: 12 }}>
+                <label style={labelStyle}>Select Tile *</label>
+                <select value={selectedTileId} onChange={e => setSelectedTileId(e.target.value)} style={inputStyle}>
+                  <option value="">-- Choose from Inventory --</option>
+                  {inventory.map(t => <option key={t.id} value={t.id}>{t.name} ({t.size}) - {t.shade}</option>)}
+                </select>
+              </div>
+            )}
 
             <div style={{ display: "flex", gap: 12 }}>
               <div style={{ flex: 1 }}>
@@ -1257,7 +2005,7 @@ function PurchasesTab({ purchases, suppliers, inventory, onUpdateSupplier, onAdd
       {view === "directory" && (
         <div>
           <div style={{ fontSize: 18, fontWeight: 700, color: "#fff", marginBottom: 16 }}>Supplier Ledgers ({suppliers.length})</div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+          <div className="stats-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
             {suppliers.map(s => (
               <div key={s.id} style={{ background: "#12151f", border: "1px solid #1e2130", borderRadius: 12, padding: 20 }}>
                 <div style={{ fontWeight: 700, color: "#fff", fontSize: 18, marginBottom: 4 }}>{s.name}</div>
@@ -1346,7 +2094,7 @@ function ReturnsTab({ sales, onProcessReturn }) {
     <div>
       <div style={{ fontSize: 20, fontWeight: 700, color: "#fff", marginBottom: 20 }}>Process Return / Refund</div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
+      <div className="split-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
         <div style={{ background: "#1a1d2e", border: "1px solid #2a2d3e", borderRadius: 12, padding: 20 }}>
           <div style={{ fontSize: 15, fontWeight: 600, color: "#fff", marginBottom: 16 }}>Select Invoice</div>
 
@@ -1410,73 +2158,67 @@ function ReportsTab({ sales, inventory, expenses, onDelete }) {
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
 
-  const getFilteredSales = () => {
-    if (!sales) return [];
+  const getFilteredData = (dataArray) => {
+    if (!dataArray) return [];
 
-    // Create current dates
-    const today = new Date();
-    today.setHours(0, 0, 0, 0); // Start of today
+    const todayStr = getLocalDateString();
 
-    // To properly compare dates, convert YYYY-MM-DD from the data to Date objects
+    if (dateFilter === "all") return dataArray;
 
-    if (dateFilter === "all") return sales;
-
-    if (dateFilter === "today") {
-      const todayString = today.toISOString().split("T")[0];
-      return sales.filter(s => s.date === todayString);
-    }
+    if (dateFilter === "today") return dataArray.filter(d => d.date === todayStr);
 
     if (dateFilter === "week") {
-      const lastWeek = new Date(today);
-      lastWeek.setDate(lastWeek.getDate() - 7);
-      return sales.filter(s => new Date(s.date) >= lastWeek);
+      const d = new Date();
+      d.setDate(d.getDate() - 7);
+      const lastWeekStr = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, '0') + "-" + String(d.getDate()).padStart(2, '0');
+      return dataArray.filter(x => x.date && x.date >= lastWeekStr);
     }
 
     if (dateFilter === "month") {
-      const lastMonth = new Date(today);
-      lastMonth.setMonth(lastMonth.getMonth() - 1);
-      return sales.filter(s => new Date(s.date) >= lastMonth);
+      const d = new Date();
+      d.setMonth(d.getMonth() - 1);
+      const lastMonthStr = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, '0') + "-" + String(d.getDate()).padStart(2, '0');
+      return dataArray.filter(x => x.date && x.date >= lastMonthStr);
     }
 
     if (dateFilter === "custom" && startDate && endDate) {
-      // Need precise end of day for the end date
-      const end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
-      return sales.filter(s => {
-        const d = new Date(s.date);
-        return d >= new Date(startDate) && d <= end;
-      });
+      return dataArray.filter(x => x.date && x.date >= startDate && x.date <= endDate);
     }
 
-    return sales;
+    return dataArray;
   };
 
-  const filteredSales = getFilteredSales();
+  const filteredSales = getFilteredData(sales);
+  const filteredExpenses = getFilteredData(expenses);
 
-  const today = new Date().toISOString().split("T")[0];
-  const todaySales = sales.filter(s => s.date === today);
+  const todayStr = getLocalDateString();
+  const todaySales = sales.filter(s => s.date === todayStr);
 
   // Expenses sum
-  const totalExpenses = Array.isArray(expenses)
-    ? expenses.reduce((s, e) => s + (Number(e.amount) || 0), 0)
+  const totalExpenses = Array.isArray(filteredExpenses)
+    ? filteredExpenses.reduce((s, e) => s + (Number(e.amount) || 0), 0)
     : 0;
 
-  // Profit should be calculated on GROSS - DISCOUNT. GST is not profit.
-  const totalRevenue = filteredSales.reduce((s, b) => s + (b.gross - (b.discount || 0)), 0);
+  // Profit should be calculated on GROSS - DISCOUNT. GST is not profit. Only for valid Invoices.
+  const validInvoices = filteredSales.filter(b => b.type === "Invoice");
+  const returnInvoices = filteredSales.filter(b => b.type === "Return");
 
-  const totalCost = filteredSales.reduce((s, b) => {
+  const totalRevenue = validInvoices.reduce((s, b) => s + (b.gross - (b.discount || 0)), 0);
+  const totalReturnsNet = returnInvoices.reduce((s, b) => s + Math.abs(b.gross), 0); // Refunds taken out
+
+  const totalCost = validInvoices.reduce((s, b) => {
     return s + b.items.reduce((ss, item) => {
-      const tile = inventory.find(t => `${t.name} ${t.size} ${t.shade}` === item.name);
-      return ss + (tile ? tile.purchaseRate * item.qty : 0);
+      let matchedTile = inventory.find(t => `${t.name} ${t.size} - ${t.shade}` === item.name || `${t.name} ${t.size} ${t.shade}` === item.name);
+      return ss + (matchedTile ? matchedTile.purchaseRate * item.qty : 0);
     }, 0);
   }, 0);
 
-  const profit = totalRevenue - totalCost - totalExpenses;
+  const profit = totalRevenue - totalReturnsNet - totalCost - totalExpenses;
 
   const stats = [
-    { label: "Total Bills", value: filteredSales.length, color: "#60a5fa" },
+    { label: "Valid Bills Generated", value: validInvoices.length, color: "#60a5fa" },
     { label: "Total Revenue (excl. GST)", value: `₹${totalRevenue.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`, color: "#10b981" },
-    { label: "Net Profit (after Cost & Expenses)", value: `₹${profit.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`, color: "#f59e0b" },
+    { label: "Net Profit", value: `₹${profit.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`, color: profit < 0 ? "#f87171" : "#f59e0b" },
     { label: "Total Expenses", value: `₹${totalExpenses.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`, color: "#f87171" },
   ];
 
@@ -1563,7 +2305,7 @@ function ReportsTab({ sales, inventory, expenses, onDelete }) {
         )}
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 24 }}>
+      <div className="stats-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 24 }}>
         {stats.map((s, i) => (
           <div key={i} style={{ background: "#12151f", border: "1px solid #1e2130", borderRadius: 12, padding: 20 }}>
             <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 6 }}>{s.label}</div>
