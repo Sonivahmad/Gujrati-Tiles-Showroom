@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 
+
 // ─── MOCK DATABASE (Replace with Firebase later) ───────────────────────────
 // SaaS-ready: each record has shopId. For single shop, shopId = "shop_001"
 // Later: shopId = Firebase Auth UID
@@ -250,11 +251,11 @@ export default function TilesApp() {
   const deadStock = inventory.filter(t => t.shopId === SHOP_ID && t.stock === 0);
 
   return (
-    <div style={{ fontFamily: "'DM Sans', sans-serif", background: "#0f1117", minHeight: "100vh", color: "#e8e8e8" }}>
+    <div className="app-container">
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
 
       {/* Header */}
-      <div style={{ background: "linear-gradient(135deg, #1a1d2e 0%, #12151f 100%)", borderBottom: "1px solid #2a2d3e", padding: "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+      <div className="header">
         <div>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <div style={{ width: 36, height: 36, background: "linear-gradient(135deg, #f59e0b, #ef4444)", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🪨</div>
@@ -279,14 +280,14 @@ export default function TilesApp() {
       </div>
 
       {/* Nav */}
-      <div style={{ display: "flex", background: "#12151f", borderBottom: "1px solid #1e2130", padding: "0 16px" }}>
+      {/* Tabs */}
+      <div className="tabs-container">
         {tabs.map(t => (
-          <button key={t.id} onClick={() => setTab(t.id)} style={{
-            padding: "12px 16px", fontSize: 13, fontWeight: 500, cursor: "pointer", border: "none",
-            background: "transparent", color: tab === t.id ? "#f59e0b" : "#6b7280",
-            borderBottom: tab === t.id ? "2px solid #f59e0b" : "2px solid transparent",
-            display: "flex", alignItems: "center", gap: 6, transition: "all 0.2s", fontFamily: "'DM Sans', sans-serif"
-          }}>
+          <button
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            className={`tab-button ${tab === t.id ? 'active' : ''}`}
+          >
             <Icon d={t.icon} size={15} color={tab === t.id ? "#f59e0b" : "#6b7280"} />
             {t.label}
           </button>
@@ -294,7 +295,7 @@ export default function TilesApp() {
       </div>
 
       {/* Content */}
-      <div style={{ padding: 20, maxWidth: 1000, margin: "0 auto" }}>
+      <div className="content-wrapper">
         {tab === "billing" && <BillingTab inventory={inventory.filter(t => t.shopId === SHOP_ID)} customers={customers.filter(c => c.shopId === SHOP_ID)} onSave={addSale} />}
         {tab === "inventory" && <InventoryTab inventory={inventory.filter(t => t.shopId === SHOP_ID)} onAdd={addInventory} onDelete={deleteInventory} />}
         {tab === "calculator" && <CalculatorTab inventory={inventory.filter(t => t.shopId === SHOP_ID)} />}
@@ -460,9 +461,11 @@ function BillingTab({ inventory, customers, onSave }) {
   if (billDone) return <BillPreview bill={billDone} onNew={() => setBillDone(null)} />;
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 380px", gap: 24, alignItems: "start" }}>
-      {/* LEFT COLUMN: Main Form */}
-      <div>
+    <div className="billing-layout">
+
+      {/* ─── LEFT COLUMN ─── Main form: toggle, search, cart ─── */}
+      <div className="billing-main">
+
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
           <div>
             <div style={{ fontSize: 20, fontWeight: 700, color: "#fff", marginBottom: 4 }}>Create Document</div>
@@ -471,22 +474,43 @@ function BillingTab({ inventory, customers, onSave }) {
 
           {/* Toggle Invoice vs Estimate */}
           <div style={{ display: "flex", background: "#1a1d2e", padding: 4, borderRadius: 8, border: "1px solid #2a2d3e" }}>
-            <button onClick={() => setDocType("Invoice")} style={{ ...btnStyle, background: docType === "Invoice" ? "#10b981" : "transparent", color: docType === "Invoice" ? "#000" : "#9ca3af", fontWeight: docType === "Invoice" ? 700 : 500, padding: "6px 16px", borderRadius: 6 }}>Invoice</button>
-            <button onClick={() => setDocType("Estimate")} style={{ ...btnStyle, background: docType === "Estimate" ? "#f59e0b" : "transparent", color: docType === "Estimate" ? "#000" : "#9ca3af", fontWeight: docType === "Estimate" ? 700 : 500, padding: "6px 16px", borderRadius: 6 }}>Estimate</button>
+            <button
+              onClick={() => setDocType("Invoice")}
+              className={`btn ${docType === "Invoice" ? "btn-primary" : ""}`}
+            >
+              Invoice
+            </button>
+            <button
+              onClick={() => setDocType("Estimate")}
+              className={`btn ${docType === "Estimate" ? "btn-accent" : ""}`}
+            >
+              Estimate
+            </button>
           </div>
         </div>
 
         {/* Smart Search */}
         <div style={{ marginBottom: 24, position: "relative" }}>
-          <label style={labelStyle}>Search Inventory</label>
+          <label className="label">Search Inventory</label>
           <div style={{ position: "relative" }}>
             <div style={{ position: "absolute", left: 14, top: 12, color: "#9ca3af" }}>🔍</div>
-            <input ref={searchRef} value={search} onChange={e => { setSearch(e.target.value); setSelectedTile(null); }}
+            <input
+              ref={searchRef}
+              value={search}
+              onChange={e => { setSearch(e.target.value); setSelectedTile(null); }}
               placeholder="Type tile name, shade, or size..."
-              style={{ ...inputStyle, paddingLeft: 40, paddingRight: 40, fontSize: 16, padding: "14px 14px 14px 44px" }} />
-            {search && <div style={{ position: "absolute", right: 14, top: 12, fontSize: 18, cursor: "pointer", color: "#6b7280" }} onClick={() => { setSearch(""); setSuggestions([]); setSelectedTile(null); }}>×</div>}
+              className="input"
+              style={{ paddingLeft: 40, paddingRight: 40 }}
+            />
+            {search && (
+              <div
+                style={{ position: "absolute", right: 14, top: 12, fontSize: 18, cursor: "pointer", color: "#6b7280" }}
+                onClick={() => { setSearch(""); setSuggestions([]); setSelectedTile(null); }}
+              >
+                ×
+              </div>
+            )}
           </div>
-
           {/* Suggestions Dropdown */}
           {suggestions.length > 0 && (
             <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: "#1a1d2e", border: "1px solid #2a2d3e", borderRadius: 10, zIndex: 50, overflow: "hidden", boxShadow: "0 8px 32px rgba(0,0,0,0.5)" }}>
@@ -557,14 +581,19 @@ function BillingTab({ inventory, customers, onSave }) {
       </div>
 
       {/* RIGHT COLUMN: Customer & Payment Details */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+      <div className="billing-sidebar">
         {/* Customer Details block */}
-        <div style={{ background: "#1a1d2e", border: "1px solid #2a2d3e", borderRadius: 12, padding: 20 }}>
-          <div style={{ fontSize: 15, fontWeight: 600, color: "#fff", marginBottom: 16 }}>Customer Details</div>
+        <div className="card">
+          <div className="card-header">Customer Details</div>
 
           <div style={{ position: "relative", marginBottom: 12 }}>
-            <label style={labelStyle}>Customer Name *</label>
-            <input value={customerName} onChange={e => { setCustomerName(e.target.value); setSelectedCustomerId(null); }} placeholder="e.g. Ramesh Sharma" style={inputStyle} />
+            <label className="label">Customer Name *</label>
+            <input
+              value={customerName}
+              onChange={e => { setCustomerName(e.target.value); setSelectedCustomerId(null); }}
+              placeholder="e.g. Ramesh Sharma"
+              className="input"
+            />
 
             {customerSuggestions.length > 0 && (
               <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: "#252837", border: "1px solid #374151", borderRadius: 8, zIndex: 60, marginTop: 4, overflow: "hidden" }}>
@@ -582,14 +611,19 @@ function BillingTab({ inventory, customers, onSave }) {
           </div>
 
           <div>
-            <label style={labelStyle}>Phone Number</label>
-            <input value={customerPhone} onChange={e => setCustomerPhone(e.target.value)} placeholder="e.g. 9876543210" style={inputStyle} />
+            <label className="label">Phone Number</label>
+            <input
+              value={customerPhone}
+              onChange={e => setCustomerPhone(e.target.value)}
+              placeholder="e.g. 9876543210"
+              className="input"
+            />
           </div>
         </div>
 
         {/* Payment Summary */}
-        <div style={{ background: "#12151f", border: "1px solid #1e2130", borderRadius: 12, padding: 20 }}>
-          <div style={{ fontSize: 15, fontWeight: 600, color: "#fff", marginBottom: 16 }}>Billing Summary</div>
+        <div className="card">
+          <div className="card-header">Billing Summary</div>
 
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
             <span style={{ fontSize: 13, color: "#9ca3af" }}>Gross Amount</span>
@@ -650,7 +684,7 @@ function BillingTab({ inventory, customers, onSave }) {
             </>
           )}
 
-          <button onClick={handleSave} style={{ ...btnStyle, width: "100%", background: "linear-gradient(135deg, #10b981, #059669)", color: "#fff", fontWeight: 700, fontSize: 15, padding: "14px" }}>
+          <button onClick={handleSave} className="btn btn-primary" style={{ width: "100%", padding: "14px", fontSize: 15 }}>
             {docType === "Estimate" ? "📄 Provide Estimate" : "💾 Save Invoice"}
           </button>
         </div>
