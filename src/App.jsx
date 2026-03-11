@@ -73,31 +73,6 @@ function LandingPage({ onLogin }) {
   const [recaptchaVerifier, setRecaptchaVerifier] = useState(null);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
 
-  useEffect(() => {
-    // Only init Recaptcha if we haven't already and we are in the Auth screen
-    if (showAuth) {
-      const container = document.getElementById('recaptcha-container');
-      if (container && !window.recaptchaVerifier) {
-        window.recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
-          'size': 'invisible',
-          'callback': (response) => {
-            // reCAPTCHA solved
-          }
-        });
-        setRecaptchaVerifier(window.recaptchaVerifier);
-      }
-    }
-    
-    return () => {
-      // Clear out the recaptcha instance if the auth modal closes to prevent detachment errors
-      if (!showAuth && window.recaptchaVerifier) {
-        window.recaptchaVerifier.clear();
-        window.recaptchaVerifier = null;
-        setRecaptchaVerifier(null);
-      }
-    };
-  }, [showAuth]);
-
   const openAuth = (mode) => {
     setAuthMode(mode);
     setStep(1);
@@ -145,8 +120,8 @@ function LandingPage({ onLogin }) {
       }
       
       const appVerifier = window.recaptchaVerifier;
-      // Pre-render before calling send
-      await appVerifier.render();
+      // Pre-render is automatically handled by signInWithPhoneNumber.
+      // Explicitly calling render() here breaks testing bypass & throws MALFORMED errors.
       
       const result = await signInWithPhoneNumber(auth, formattedPhone, appVerifier);
       setConfirmationResult(result);
