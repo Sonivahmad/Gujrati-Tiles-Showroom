@@ -24,6 +24,11 @@ body {
     color: var(--text);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
+}
+
+*, *::before, *::after {
+    box-sizing: border-box;
 }
 
 .app-container {
@@ -345,6 +350,7 @@ body {
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 24px;
     width: 100%;
+    margin: 0 20px;
     max-width: 420px;
     padding: 40px 32px;
     box-shadow: 0 24px 48px rgba(0, 0, 0, 0.4), 
@@ -634,11 +640,45 @@ body {
     margin: 0 auto;
     width: 100%;
     gap: 60px;
+    overflow: hidden;
 }
 
-.hero-content {
-    flex: 1;
-    max-width: 540px;
+/* --- PREMIUM ANIMATIONS --- */
+
+
+@keyframes fadeInUp {
+    from {
+        opacity: 0;
+        transform: translateY(30px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes floatElement {
+    0% {
+        transform: translateY(0px) rotateY(-5deg) rotateX(5deg);
+    }
+    50% {
+        transform: translateY(-15px) rotateY(-2deg) rotateX(2deg);
+    }
+    100% {
+        transform: translateY(0px) rotateY(-5deg) rotateX(5deg);
+    }
+}
+
+@keyframes glowPulse {
+    0% {
+        box-shadow: 0 0 10px rgba(245, 158, 11, 0.2);
+    }
+    50% {
+        box-shadow: 0 0 25px rgba(245, 158, 11, 0.4);
+    }
+    100% {
+        box-shadow: 0 0 10px rgba(245, 158, 11, 0.2);
+    }
 }
 
 .hero-content h1 {
@@ -648,13 +688,7 @@ body {
     margin-bottom: 24px;
     color: #fff;
     letter-spacing: -1px;
-}
-
-.highlight-text {
-    background: linear-gradient(to right, #f59e0b, #ef4444);
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
+    animation: fadeInUp 0.8s ease-out forwards;
 }
 
 .hero-content p {
@@ -662,54 +696,16 @@ body {
     color: #9ca3af;
     margin-bottom: 32px;
     line-height: 1.6;
+    opacity: 0;
+    animation: fadeInUp 0.8s ease-out 0.2s forwards;
 }
 
 .hero-buttons {
     display: flex;
     gap: 16px;
     flex-wrap: wrap;
-}
-
-.hero-primary-btn {
-    padding: 14px 28px;
-    border-radius: 12px;
-    border: none;
-    background: linear-gradient(135deg, #f59e0b, #d97706);
-    color: #000;
-    font-size: 16px;
-    font-weight: 700;
-    cursor: pointer;
-    box-shadow: 0 4px 14px rgba(245, 158, 11, 0.3);
-    transition: transform 0.15s, filter 0.2s;
-}
-
-.hero-primary-btn:hover {
-    filter: brightness(1.1);
-    transform: translateY(-2px);
-}
-
-.hero-secondary-btn {
-    padding: 14px 28px;
-    border-radius: 12px;
-    border: 1px solid #374151;
-    background: rgba(255,255,255,0.05);
-    color: #fff;
-    font-size: 16px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.2s;
-}
-
-.hero-secondary-btn:hover {
-    background: rgba(255,255,255,0.1);
-}
-
-.hero-image-wrapper {
-    flex: 1;
-    display: flex;
-    justify-content: center;
-    position: relative;
-    perspective: 1000px;
+    opacity: 0;
+    animation: fadeInUp 0.8s ease-out 0.4s forwards;
 }
 
 .hero-image {
@@ -721,18 +717,59 @@ body {
     border: 1px solid rgba(255,255,255,0.1);
     transform: rotateY(-5deg) rotateX(5deg);
     transition: transform 0.5s ease;
+    animation: floatElement 6s ease-in-out infinite;
 }
 
 .hero-image:hover {
-    transform: rotateY(0deg) rotateX(0deg);
+    transform: rotateY(0deg) rotateX(0deg) scale(1.02);
+    border-color: rgba(245, 158, 11, 0.4);
+    box-shadow: 0 0 40px rgba(245, 158, 11, 0.2);
+    animation-play-state: paused;
 }
 
-.landing-footer {
-    padding: 30px 40px;
-    text-align: center;
-    border-top: 1px solid var(--border);
-    margin-top: auto;
-    background: #0b0c10;
+#features h2, #pricing h2 {
+    opacity: 0;
+    animation: fadeInUp 0.8s ease-out forwards;
+}
+
+.landing-nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px 40px;
+    background: rgba(18, 21, 31, 0.85);
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    transition: all 0.3s;
+}
+
+/* Feature Cards Premium Hover */
+#features > div > div > div {
+    transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275), box-shadow 0.3s ease, border-color 0.3s ease !important;
+}
+
+#features > div > div > div:hover {
+    transform: translateY(-8px) !important;
+    border-color: rgba(245, 158, 11, 0.3) !important;
+    box-shadow: 0 20px 40px rgba(0,0,0,0.5), inset 0 0 0 1px rgba(255,255,255,0.05) !important;
+}
+
+/* Pricing Cards Premium Hover */
+#pricing > div > div > div {
+    transition: transform 0.3s ease, box-shadow 0.3s ease, filter 0.3s ease !important;
+}
+
+#pricing > div > div > div:hover {
+    transform: translateY(-10px) !important;
+    box-shadow: 0 24px 48px rgba(0,0,0,0.6) !important;
+}
+
+/* Make Pro Card Glow */
+#pricing > div > div > div:nth-child(3) {
+    animation: glowPulse 4s infinite;
 }
 
 .footer-links {
@@ -775,8 +812,90 @@ body {
     .landing-nav {
         padding: 16px 20px;
     }
-    .landing-links span {
-        display: none; /* Hide text links on mobile */
+    .landing-links {
+        display: none; /* Hide standard flex flow */
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        background: rgba(18, 21, 31, 0.98);
+        flex-direction: column;
+        padding: 24px;
+        border-bottom: 1px solid var(--border);
+        box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+    .landing-links.open {
+        display: flex; /* Show when toggled via hamburger */
+    }
+    .hamburger-btn {
+        display: block !important;
+    }
+}
+
+@media (max-width: 768px) {
+    body, html {
+        overflow-x: hidden;
+    }
+    
+    .landing-hero {
+        padding: 40px 20px;
+        flex-direction: column;
+        overflow: hidden;
+    }
+
+    /* Stack feature cards */
+    #features > div > div {
+        flex-direction: column !important;
+        gap: 24px !important;
+    }
+    
+    /* Stack pricing cards */
+    #pricing > div > div {
+        flex-direction: column !important;
+        gap: 32px !important;
+    }
+    
+    /* Center text inside stacked cards */
+    #features > div > div > div,
+    #pricing > div > div > div {
+        text-align: center !important;
+    }
+    
+    /* Realign bullet points for centered pricing */
+    #pricing > div > div > div ul {
+        align-self: center;
+        text-align: left;
+        display: inline-block;
+        margin: 0 auto;
+    }
+    
+    /* Authentication Screen Mobile Fitting */
+    .auth-container {
+        padding: 12px;
+        align-items: flex-start;
+        padding-top: 60px;
+    }
+    .auth-card {
+        padding: 24px 20px;
+        max-height: calc(100vh - 80px);
+        overflow-y: auto;
+    }
+    .auth-header h2 {
+        font-size: 20px;
+    }
+    .auth-logo {
+        font-size: 32px;
+        margin-bottom: 8px;
+    }
+    
+    /* Subscription Modal Mobile Fitting */
+    .subscription-modal-card {
+        padding: 24px 20px !important;
+        max-height: 90vh;
+        overflow-y: auto;
+    }
+    .subscription-modal-card h2 {
+        font-size: 22px !important;
     }
 }
 

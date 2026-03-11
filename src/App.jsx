@@ -2,8 +2,9 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import html2canvas from "html2canvas";
 import jsPDF from "jspdf";
 import { auth, db } from "./firebase";
-import { RecaptchaVerifier, signInWithPhoneNumber, onAuthStateChanged } from "firebase/auth";
+import { RecaptchaVerifier, signInWithPhoneNumber, onAuthStateChanged, setPersistence, browserLocalPersistence } from "firebase/auth";
 import { doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
+import { sendReminderSms } from "./utils/sms";
 
 const getLocalDateString = () => {
   const d = new Date();
@@ -70,21 +71,32 @@ function LandingPage({ onLogin }) {
   const [isLoading, setIsLoading] = useState(false);
   const [confirmationResult, setConfirmationResult] = useState(null);
   const [recaptchaVerifier, setRecaptchaVerifier] = useState(null);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
 
   useEffect(() => {
     // Only init Recaptcha if we haven't already and we are in the Auth screen
-    if (!recaptchaVerifier && showAuth) {
-      if (!window.recaptchaVerifier) {
+    if (showAuth) {
+      const container = document.getElementById('recaptcha-container');
+      if (container && !window.recaptchaVerifier) {
         window.recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
           'size': 'invisible',
           'callback': (response) => {
-            // reCAPTCHA solved, allow signInWithPhoneNumber.
+            // reCAPTCHA solved
           }
         });
+        setRecaptchaVerifier(window.recaptchaVerifier);
       }
-      setRecaptchaVerifier(window.recaptchaVerifier);
     }
-  }, [showAuth, recaptchaVerifier]);
+    
+    return () => {
+      // Clear out the recaptcha instance if the auth modal closes to prevent detachment errors
+      if (!showAuth && window.recaptchaVerifier) {
+        window.recaptchaVerifier.clear();
+        window.recaptchaVerifier = null;
+        setRecaptchaVerifier(null);
+      }
+    };
+  }, [showAuth]);
 
   const openAuth = (mode) => {
     setAuthMode(mode);
@@ -96,6 +108,19 @@ function LandingPage({ onLogin }) {
     setShowAuth(true);
   };
 
+  const handleNavClick = (e, sectionId) => {
+    e.preventDefault();
+    setIsMenuOpen(false);
+    if (showAuth) {
+      setShowAuth(false);
+      setTimeout(() => {
+        document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth" });
+      }, 100);
+    } else {
+      document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth" });
+    }
+  };
+
   const handleSendOtp = async (e) => {
     e.preventDefault();
     if (authMode === "signup" && !shopName.trim()) return alert("Please enter your Shop Name");
@@ -105,13 +130,37 @@ function LandingPage({ onLogin }) {
     let formattedPhone = "+91" + phone;
 
     try {
+      if (!window.recaptchaVerifier) {
+        window.recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
+          'size': 'invisible',
+          'callback': (response) => {
+            // reCAPTCHA solved, allow signInWithPhoneNumber.
+          },
+          'expired-callback': () => {
+             // Response expired. Ask user to solve reCAPTCHA again.
+             if (window.recaptchaVerifier) window.recaptchaVerifier.clear();
+             window.recaptchaVerifier = null;
+          }
+        });
+      }
+      
       const appVerifier = window.recaptchaVerifier;
+      // Pre-render before calling send
+      await appVerifier.render();
+      
       const result = await signInWithPhoneNumber(auth, formattedPhone, appVerifier);
       setConfirmationResult(result);
       setStep(2);
       setIsLoading(false);
     } catch (error) {
-      console.error("SMS SMS Error:", error);
+      console.error("SMS Error:", error);
+      
+      // If the recaptcha failed or detached, reset it forcefully so they can try again
+      if (window.recaptchaVerifier) {
+         window.recaptchaVerifier.clear();
+         window.recaptchaVerifier = null;
+      }
+      
       alert("Error sending OTP: " + error.message);
       setIsLoading(false);
     }
@@ -136,14 +185,20 @@ function LandingPage({ onLogin }) {
     setIsLoading(true);
     try {
       if (confirmationResult) {
+        // Enforce Local Persistence for the session so `onAuthStateChanged` triggers cleanly
+        await setPersistence(auth, browserLocalPersistence);
+        
         // Live Firebase verification
         const result = await confirmationResult.confirm(enteredOtp);
         const user = result.user;
 
-        // If it's a signup, we would technically want to save the shopName to their profile here.
-        // For now, we will just proceed.
+        // If it's a signup, we pass the setup data to the parent so it can be pushed to Firestore
         setIsLoading(false);
-        onLogin(user);
+        if (authMode === "signup") {
+          onLogin(user, shopName, gst);
+        } else {
+          onLogin(user);
+        }
       } else {
         throw new Error("Confirmation Result missing. Please resend the OTP.");
       }
@@ -155,7 +210,27 @@ function LandingPage({ onLogin }) {
   };
 
   return (
-    <div className="landing-container">
+    <div className="landing-container" id="home">
+      {/* PERSISTENT NAVBAR */}
+      <nav className="landing-nav">
+        <div className="landing-logo" style={{ cursor: "pointer" }} onClick={(e) => handleNavClick(e, "home")}>
+          🪨 TileSync <span style={{ fontSize: 12, background: "#1e3a8a", color: "#93c5fd", padding: "2px 6px", borderRadius: 4, marginLeft: 8 }}>SaaS</span>
+        </div>
+        
+        {/* Mobile Hamburger Button */}
+        <button className="hamburger-btn" onClick={() => setIsMenuOpen(!isMenuOpen)} style={{ display: "none", background: "transparent", border: "none", color: "#fff", fontSize: 24, cursor: "pointer" }}>
+          {isMenuOpen ? "✕" : "☰"}
+        </button>
+
+        <div className={`landing-links ${isMenuOpen ? "open" : ""}`}>
+          <a href="#home" onClick={(e) => handleNavClick(e, "home")} style={{ color: "#cbd5e1", textDecoration: "none", fontWeight: 500 }}>Home</a>
+          <a href="#features" onClick={(e) => handleNavClick(e, "features")} style={{ color: "#cbd5e1", textDecoration: "none", fontWeight: 500 }}>Features</a>
+          <a href="#pricing" onClick={(e) => handleNavClick(e, "pricing")} style={{ color: "#cbd5e1", textDecoration: "none", fontWeight: 500 }}>Pricing</a>
+          {!showAuth && <button className="nav-login-btn" onClick={() => { setIsMenuOpen(false); openAuth("login"); }}>Login</button>}
+          <button className="nav-signup-btn" onClick={() => { setIsMenuOpen(false); openAuth("signup"); }}>Start Free Trial</button>
+        </div>
+      </nav>
+
       {showAuth ? (
         <div className="auth-container">
           <div className="auth-card">
@@ -163,7 +238,7 @@ function LandingPage({ onLogin }) {
             <div className="auth-header">
               <div className="auth-logo">🪨</div>
               <h2>{authMode === "signup" ? "Create Account" : "Welcome Back"}</h2>
-              <p>{authMode === "signup" ? "Register your showroom on TileSync" : "Login to your Gujrati Tiles dashboard"}</p>
+              <p>{authMode === "signup" ? "Register your showroom on TileSync" : "Login to your TileSync dashboard"}</p>
             </div>
 
             {step === 1 ? (
@@ -226,15 +301,6 @@ function LandingPage({ onLogin }) {
         </div>
       ) : (
         <>
-          <nav className="landing-nav">
-            <div className="landing-logo">🪨 TileSync <span style={{ fontSize: 12, background: "#1e3a8a", color: "#93c5fd", padding: "2px 6px", borderRadius: 4, marginLeft: 8 }}>SaaS</span></div>
-            <div className="landing-links">
-              <span onClick={() => alert("Privacy Policy: All showroom data is strictly confidential and end-to-end encrypted on our dedicated servers.")}>🔒 Privacy Policy</span>
-              <button className="nav-login-btn" onClick={() => openAuth("login")}>Login</button>
-              <button className="nav-signup-btn" onClick={() => openAuth("signup")}>Start Free Trial</button>
-            </div>
-          </nav>
-
           <header className="landing-hero">
             <div className="hero-content">
               <h1>The Ultimate Operating System for <br /><span className="highlight-text">Tile Showrooms 🚀</span></h1>
@@ -253,6 +319,82 @@ function LandingPage({ onLogin }) {
             </div>
           </header>
 
+          <section id="features" style={{ padding: "80px 20px", background: "#0b0c10", textAlign: "center", borderTop: "1px solid #1e2130" }}>
+            <div style={{ maxWidth: 1000, margin: "0 auto" }}>
+              <h2 style={{ fontSize: 36, fontWeight: 700, color: "#fff", marginBottom: 16 }}>How TileSync Helps Your Business</h2>
+              <p style={{ fontSize: 18, color: "#9ca3af", marginBottom: 48 }}>Stop using paper diaries and scattered ledgers. Transition to a smart ecosystem built specifically for tile showrooms.</p>
+              
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 32 }}>
+                {[
+                  { icon: "📦", title: "Smart Inventory", desc: "Instantly track stock across boxes and square feet. Never oversell what you don't have." },
+                  { icon: "📄", title: "GST Invoices in Seconds", desc: "Generate professional bills and estimates. Share instantly via WhatsApp as clean PDFs." },
+                  { icon: "💰", title: "Ledger & Dues", desc: "Track customer outstandings precisely. Instantly see who owes you, replacing loose sticky notes." },
+                  { icon: "🔁", title: "Seamless Returns", desc: "Process item returns, restock inventory, and update payment ledgers with a single click." },
+                  { icon: "📊", title: "Profit Tracking", desc: "Log purchases, calculate selling margins, track expenses, and view accurate monthly net profits." },
+                  { icon: "📱", title: "Auto-Reminders", desc: "Automatically send SMS reminders to customers with pending payments over 7 days." }
+                ].map((feat, i) => (
+                  <div key={i} style={{ background: "#12151f", padding: 32, borderRadius: 16, border: "1px solid #1e2130", textAlign: "left" }}>
+                    <div style={{ fontSize: 40, marginBottom: 16 }}>{feat.icon}</div>
+                    <div style={{ fontSize: 20, fontWeight: 700, color: "#fff", marginBottom: 12 }}>{feat.title}</div>
+                    <div style={{ fontSize: 15, color: "#6b7280", lineHeight: 1.6 }}>{feat.desc}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          <section id="pricing" style={{ padding: "80px 20px", background: "#12151f", textAlign: "center", borderTop: "1px solid #1e2130" }}>
+            <div style={{ maxWidth: 1000, margin: "0 auto" }}>
+              <h2 style={{ fontSize: 36, fontWeight: 700, color: "#fff", marginBottom: 16 }}>Simple, Transparent Pricing</h2>
+              <p style={{ fontSize: 18, color: "#9ca3af", marginBottom: 48 }}>Choose the plan that fits your showroom size. No hidden fees.</p>
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 24, alignItems: "stretch" }}>
+                <div style={{ background: "#1a1d2e", padding: "40px 24px", borderRadius: 24, border: "1px solid #2a2d3e", textAlign: "left", display: "flex", flexDirection: "column" }}>
+                  <div style={{ fontSize: 20, fontWeight: 600, color: "#fff" }}>Free Tier</div>
+                  <div style={{ fontSize: 40, fontWeight: 700, color: "#fff", margin: "16px 0" }}>₹0</div>
+                  <div style={{ fontSize: 13, color: "#9ca3af", marginBottom: 24 }}>Perfect for trying out the platform.</div>
+                  <ul style={{ listStyle: "none", padding: 0, margin: 0, color: "#cbd5e1", fontSize: 14, flex: 1 }}>
+                    <li style={{ marginBottom: 12 }}>✔️ 10 Bills / Invoices Total</li>
+                    <li style={{ marginBottom: 12 }}>✔️ Basic Inventory Tracking</li>
+                    <li style={{ marginBottom: 12 }}>✔️ Single User Access</li>
+                    <li style={{ marginBottom: 12, color: "#6b7280" }}>✖️ Unlimited Invoices</li>
+                    <li style={{ marginBottom: 12, color: "#6b7280" }}>✖️ SMS Reminders</li>
+                  </ul>
+                  <button onClick={() => openAuth("signup")} style={{ width: "100%", padding: 14, marginTop: 32, background: "transparent", border: "1px solid #475569", color: "#fff", borderRadius: 8, fontWeight: 600, cursor: "pointer" }}>Start Free</button>
+                </div>
+
+                <div style={{ background: "#1a1d2e", padding: "40px 24px", borderRadius: 24, border: "1px solid #2a2d3e", textAlign: "left", display: "flex", flexDirection: "column" }}>
+                  <div style={{ fontSize: 20, fontWeight: 600, color: "#fff" }}>Standard</div>
+                  <div style={{ fontSize: 40, fontWeight: 700, color: "#fff", margin: "16px 0" }}>₹499<span style={{ fontSize: 16, color: "#9ca3af", fontWeight: 400 }}>/mo</span></div>
+                  <div style={{ fontSize: 13, color: "#9ca3af", marginBottom: 24 }}>For active showrooms with regular sales.</div>
+                  <ul style={{ listStyle: "none", padding: 0, margin: 0, color: "#cbd5e1", fontSize: 14, flex: 1 }}>
+                    <li style={{ marginBottom: 12 }}>✔️ Unlimited Bills & Quotes</li>
+                    <li style={{ marginBottom: 12 }}>✔️ Complete Inventory & Purchases</li>
+                    <li style={{ marginBottom: 12 }}>✔️ Ledger & Return Management</li>
+                    <li style={{ marginBottom: 12 }}>✔️ Profit & Loss Analytics</li>
+                    <li style={{ marginBottom: 12, color: "#6b7280" }}>✖️ SMS Reminders</li>
+                  </ul>
+                  <button onClick={() => openAuth("signup")} style={{ width: "100%", padding: 14, marginTop: 32, background: "transparent", border: "1px solid #cbd5e1", color: "#fff", borderRadius: 8, fontWeight: 600, cursor: "pointer" }}>Get Standard</button>
+                </div>
+
+                <div style={{ background: "linear-gradient(180deg, #1f1406, #12151f)", padding: "40px 24px", borderRadius: 24, border: "1px solid #92400e", textAlign: "left", position: "relative", display: "flex", flexDirection: "column" }}>
+                  <div style={{ position: "absolute", top: -14, left: "50%", transform: "translateX(-50%)", background: "linear-gradient(135deg, #f59e0b, #d97706)", color: "#000", padding: "6px 16px", borderRadius: 20, fontSize: 12, fontWeight: 700 }}>MOST POPULAR</div>
+                  <div style={{ fontSize: 20, fontWeight: 600, color: "#f59e0b" }}>TileSync Pro</div>
+                  <div style={{ fontSize: 40, fontWeight: 700, color: "#fff", margin: "16px 0" }}>₹999<span style={{ fontSize: 16, color: "#9ca3af", fontWeight: 400 }}>/mo</span></div>
+                  <div style={{ fontSize: 13, color: "#9ca3af", marginBottom: 24 }}>The ultimate upgrade with smart automations.</div>
+                  <ul style={{ listStyle: "none", padding: 0, margin: 0, color: "#cbd5e1", fontSize: 14, flex: 1 }}>
+                    <li style={{ marginBottom: 12 }}>✔️ All Standard Features</li>
+                    <li style={{ marginBottom: 12, fontWeight: 700, color: "#10b981" }}>✔️ Auto SMS Reminders (₹500 value)</li>
+                    <li style={{ marginBottom: 12 }}>✔️ Instant WhatsApp Links</li>
+                    <li style={{ marginBottom: 12 }}>✔️ Dedicated Server Resources</li>
+                    <li style={{ marginBottom: 12 }}>✔️ Priority Support</li>
+                  </ul>
+                  <button onClick={() => openAuth("signup")} style={{ width: "100%", padding: 14, marginTop: 32, background: "linear-gradient(135deg, #f59e0b, #ef4444)", border: "none", color: "#fff", borderRadius: 8, fontWeight: 700, cursor: "pointer" }}>Upgrade to Pro</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
           <footer className="landing-footer">
             <div className="footer-links">
               <span onClick={() => alert("Data strictly confidential.")}>Privacy Policy</span>
@@ -268,34 +410,81 @@ function LandingPage({ onLogin }) {
 }
 
 // ─── SUBSCRIPTION PAYWALL MODAL ──────────────────────────────────────────────
-function SubscriptionModal({ onClose }) {
-  const [billingCycle, setBillingCycle] = useState("monthly"); // "monthly" or "yearly"
+function SubscriptionModal({ onClose, onSuccess }) {
+  const [planName, setPlanName] = useState("Standard"); // "Standard" or "Pro"
+  const [isProcessing, setIsProcessing] = useState(false);
+
+  // User's Live Keys: rzp_live_SNrNPYsyvE80KR / EUm1qtOpEo8y5Ox1q88bULbq
+  const handleSubscribe = () => {
+    setIsProcessing(true);
+    const amount = planName === "Standard" ? 49900 : 99900; // Amount in paise
+    
+    // Safety check just in case the CDN script failed to load
+    if (!window.Razorpay) {
+      alert("Razorpay SDK failed to load. Please check your internet connection.");
+      setIsProcessing(false);
+      return;
+    }
+
+    const options = {
+      key: "rzp_live_SNrNPYsyvE80KR", // Live Key ID
+      amount: amount.toString(),
+      currency: "INR",
+      name: "TileSync SaaS",
+      description: `TileSync ${planName} Subscription`,
+      image: "https://cdn-icons-png.flaticon.com/512/3063/3063065.png", // Generic Tile icon
+      handler: function (response) {
+        // Payment Succeeded
+        // response.razorpay_payment_id
+        onSuccess(planName.toLowerCase(), response.razorpay_payment_id);
+      },
+      prefill: {
+        name: "TileSync Business User",
+      },
+      theme: {
+        color: "#f59e0b"
+      },
+      modal: {
+        ondismiss: function() {
+          setIsProcessing(false);
+        }
+      }
+    };
+    
+    const rzp1 = new window.Razorpay(options);
+    rzp1.on('payment.failed', function (response){
+      alert("Payment Failed: " + response.error.description);
+      setIsProcessing(false);
+    });
+    
+    rzp1.open();
+  };
 
   return (
     <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.85)", backdropFilter: "blur(5px)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: "20px" }}>
-      <div style={{ background: "#12151f", border: "1px solid #2a2d3e", borderRadius: 24, width: "100%", maxWidth: 600, padding: "40px 32px", position: "relative", textAlign: "center", boxShadow: "0 24px 48px rgba(0, 0, 0, 0.4)" }}>
+      <div className="subscription-modal-card" style={{ background: "#12151f", border: "1px solid #2a2d3e", borderRadius: 24, width: "100%", maxWidth: 600, padding: "40px 32px", position: "relative", textAlign: "center", boxShadow: "0 24px 48px rgba(0, 0, 0, 0.4)" }}>
         <button onClick={onClose} style={{ position: "absolute", top: 20, right: 20, background: "transparent", border: "none", color: "#6b7280", fontSize: 24, cursor: "pointer" }}>✕</button>
 
         <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 64, height: 64, background: "linear-gradient(135deg, #f59e0b, #d97706)", borderRadius: 16, fontSize: 32, marginBottom: 24, padding: 10 }}>
           🚀
         </div>
 
-        <h2 style={{ fontSize: 28, fontWeight: 800, color: "#fff", marginBottom: 12, letterSpacing: "-0.5px" }}>Upgrade to TileSync Pro</h2>
+        <h2 style={{ fontSize: 28, fontWeight: 800, color: "#fff", marginBottom: 12, letterSpacing: "-0.5px" }}>Upgrade to TileSync {planName}</h2>
         <p style={{ color: "#9ca3af", fontSize: 16, marginBottom: 32, lineHeight: 1.5, maxWidth: "80%", margin: "0 auto 32px auto" }}>
           You've reached the free limit of 10 invoices. Upgrade now to unlock unlimited invoices, advanced analytics, and premium CRM features!
         </p>
 
         <div style={{ display: "flex", background: "#1a1d2e", borderRadius: 12, padding: 6, margin: "0 auto 32px auto", maxWidth: 300, border: "1px solid #2a2d3e" }}>
-          <button onClick={() => setBillingCycle("monthly")} style={{ flex: 1, padding: "10px", borderRadius: 8, background: billingCycle === "monthly" ? "#374151" : "transparent", color: billingCycle === "monthly" ? "#fff" : "#9ca3af", border: "none", cursor: "pointer", fontWeight: 600, transition: "0.2s" }}>Monthly</button>
-          <button onClick={() => setBillingCycle("yearly")} style={{ flex: 1, padding: "10px", borderRadius: 8, background: billingCycle === "yearly" ? "#374151" : "transparent", color: billingCycle === "yearly" ? "#fff" : "#9ca3af", border: "none", cursor: "pointer", fontWeight: 600, transition: "0.2s" }}>
-            Yearly <span style={{ background: "#10b981", color: "#fff", fontSize: 10, padding: "2px 6px", borderRadius: 10, marginLeft: 4 }}>Save 25%</span>
+          <button onClick={() => setPlanName("Standard")} style={{ flex: 1, padding: "10px", borderRadius: 8, background: planName === "Standard" ? "#374151" : "transparent", color: planName === "Standard" ? "#fff" : "#9ca3af", border: "none", cursor: "pointer", fontWeight: 600, transition: "0.2s" }}>Standard</button>
+          <button onClick={() => setPlanName("Pro")} style={{ flex: 1, padding: "10px", borderRadius: 8, background: planName === "Pro" ? "#374151" : "transparent", color: planName === "Pro" ? "#fff" : "#9ca3af", border: "none", cursor: "pointer", fontWeight: 600, transition: "0.2s" }}>
+            Pro <span style={{ background: "#10b981", color: "#fff", fontSize: 10, padding: "2px 6px", borderRadius: 10, marginLeft: 4 }}>+ SMS</span>
           </button>
         </div>
 
         <div style={{ background: "linear-gradient(135deg, rgba(245, 158, 11, 0.1), rgba(217, 119, 6, 0.05))", border: "1px solid rgba(245, 158, 11, 0.2)", borderRadius: 16, padding: "32px", marginBottom: 32 }}>
           <div style={{ fontSize: 42, fontWeight: 800, color: "#fff", fontFamily: "'DM Mono', monospace", marginBottom: 8 }}>
-            ₹{billingCycle === "monthly" ? "499" : "4,499"}
-            <span style={{ fontSize: 16, color: "#9ca3af", fontWeight: 500 }}> / {billingCycle === "monthly" ? "mo" : "yr"}</span>
+            ₹{planName === "Standard" ? "499" : "999"}
+            <span style={{ fontSize: 16, color: "#9ca3af", fontWeight: 500 }}> / mo</span>
           </div>
           <div style={{ fontSize: 14, color: "#f59e0b", fontWeight: 600 }}>+ Applicable GST</div>
 
@@ -303,12 +492,12 @@ function SubscriptionModal({ onClose }) {
             <li>✅ <span style={{ marginLeft: 8 }}>Unlimited Invoices & Estimates</span></li>
             <li>✅ <span style={{ marginLeft: 8 }}>Unlimited Cloud Storage & Backup</span></li>
             <li>✅ <span style={{ marginLeft: 8 }}>Premium CRM Tracking & Ledger Updates</span></li>
-            <li>✅ <span style={{ marginLeft: 8 }}>Supplier Purchase Logging System</span></li>
+            {planName === "Pro" && <li>✅ <span style={{ marginLeft: 8, color: "#10b981", fontWeight: 700 }}>Automated Text/SMS Reminders</span></li>}
           </ul>
         </div>
 
-        <button onClick={() => alert("Redirecting to Razorpay secure payment gateway...")} style={{ width: "100%", background: "linear-gradient(135deg, #f59e0b, #d97706)", color: "#000", border: "none", padding: "16px", borderRadius: 12, fontSize: 16, fontWeight: 700, cursor: "pointer", transition: "transform 0.1s, filter 0.2s" }} onMouseEnter={e => e.currentTarget.style.filter = "brightness(1.1)"} onMouseLeave={e => e.currentTarget.style.filter = "brightness(1)"}>
-          Subscribe Now & Unlock
+        <button disabled={isProcessing} onClick={handleSubscribe} style={{ width: "100%", background: "linear-gradient(135deg, #f59e0b, #d97706)", color: "#000", border: "none", padding: "16px", borderRadius: 12, fontSize: 16, fontWeight: 700, cursor: isProcessing ? "wait" : "pointer", transition: "transform 0.1s, filter 0.2s", opacity: isProcessing ? 0.7 : 1 }} onMouseEnter={e => {if(!isProcessing) e.currentTarget.style.filter = "brightness(1.1)"}} onMouseLeave={e => {if(!isProcessing) e.currentTarget.style.filter = "brightness(1)"}}>
+          {isProcessing ? "Connecting to Bank..." : "Subscribe Now & Unlock"}
         </button>
         <div style={{ fontSize: 12, color: "#6b7280", marginTop: 16 }}>Secure payments powered by Stripe & Razorpay</div>
       </div>
@@ -345,6 +534,10 @@ export default function TilesApp() {
   const [expenses, setExpenses] = useState([]);
   const [purchases, setPurchases] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
+  const [isPro, setIsPro] = useState(false);
+  const [isAutoSmsEnabled, setIsAutoSmsEnabled] = useState(false);
+  const [viewedBill, setViewedBill] = useState(null);
+  const [shopData, setShopData] = useState({ name: "TileSync Store", gst: "" });
 
   useEffect(() => {
     if (!SHOP_ID) return;
@@ -361,6 +554,22 @@ export default function TilesApp() {
         setExpenses(data.expenses || []);
         setPurchases(data.purchases || []);
         setSuppliers(data.suppliers || []);
+        
+        if (data.subscription && data.subscription.status === "active") {
+          setIsPro(true);
+        } else {
+          setIsPro(false);
+        }
+        
+        // Load custom shop meta
+        setShopData({ name: data.shopName || "TileSync Store", gst: data.gst || "" });
+        
+        // Auto SMS is ONLY available for the "pro" plan. 
+        if (data.subscription && data.subscription.plan === "pro") {
+          setIsAutoSmsEnabled(data.isAutoSmsEnabled || false);
+        } else {
+          setIsAutoSmsEnabled(false);
+        }
         setIsDataLoaded(true);
       } else {
         // First time login -> Migrate Data
@@ -398,6 +607,51 @@ export default function TilesApp() {
     return () => unsubscribe();
   }, [isAuthenticated]);
 
+  // Fast2SMS Auto Reminders (7-Day Dues)
+  useEffect(() => {
+    if (!isDataLoaded || !isPro || !isAutoSmsEnabled) return;
+    
+    const checkAndSendReminders = async () => {
+      const todayStr = getLocalDateString();
+      let updatedSales = [...sales];
+      let hasChanges = false;
+      const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+      
+      for (let i = 0; i < updatedSales.length; i++) {
+        let bill = updatedSales[i];
+        if (bill.type === "Invoice" && bill.pending > 0 && bill.customerId) {
+          const billDate = new Date(bill.date).getTime();
+          const todayDate = new Date().getTime();
+          if (todayDate - billDate >= SEVEN_DAYS_MS) {
+            // Check if already reminded today
+            if (bill.lastRemindedDate !== todayStr) {
+               const customer = customers.find(c => c.id === bill.customerId);
+               if (customer && customer.phone && customer.phone.length >= 10) {
+                 const res = await sendReminderSms(customer.phone, bill.pending, "our showroom");
+                 if (res) {
+                   bill.lastRemindedDate = todayStr;
+                   hasChanges = true;
+                   console.log(`Sent auto-reminder to ${customer.phone} for ₹${bill.pending}`);
+                 }
+               }
+            }
+          }
+        }
+      }
+      
+      if (hasChanges) {
+        setSales(updatedSales);
+        pushToCloud({ sales: updatedSales });
+      }
+    };
+    
+    const timer = setTimeout(() => {
+       checkAndSendReminders();
+    }, 5000); // Check 5s after boot
+    
+    return () => clearTimeout(timer);
+  }, [isDataLoaded, isPro, isAutoSmsEnabled, sales, customers]);
+
   const pushToCloud = async (overrideData) => {
     if (!SHOP_ID) return;
     const shopRef = doc(db, "shops", SHOP_ID);
@@ -411,6 +665,19 @@ export default function TilesApp() {
       purchases: overrideData.purchases || purchases,
       suppliers: overrideData.suppliers || suppliers,
     };
+
+    if (overrideData.isAutoSmsEnabled !== undefined) {
+      payload.isAutoSmsEnabled = overrideData.isAutoSmsEnabled;
+    }
+    if (overrideData.subscription !== undefined) {
+      payload.subscription = overrideData.subscription;
+    }
+    if (overrideData.shopName !== undefined) {
+      payload.shopName = overrideData.shopName;
+    }
+    if (overrideData.gst !== undefined) {
+      payload.gst = overrideData.gst;
+    }
 
     try {
       await setDoc(shopRef, payload, { merge: true });
@@ -429,7 +696,7 @@ export default function TilesApp() {
   const addSale = (sale) => {
     const isEstimate = sale.type === "Estimate";
 
-    if (!isEstimate) {
+    if (!isEstimate && !isPro) {
       const generatedInvoiceCount = sales.filter(s => s.type === "Invoice" || s.type === "Tax Invoice").length;
       if (generatedInvoiceCount >= 10) {
         setShowSubscription(true);
@@ -743,6 +1010,7 @@ export default function TilesApp() {
     { id: "expenses", label: "Expenses", icon: "M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" },
     { id: "purchases", label: "Purchases", icon: "M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0z M13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10a1 1 0 001 1h1m8-1a1 1 0 01-1 1H9m4-1V8a1 1 0 011-1h2.586a1 1 0 01.707.293l3.414 3.414a1 1 0 01.293.707V16a1 1 0 01-1 1h-1m-6-1a1 1 0 001 1h1M5 17a2 2 0 104 0m-4 0a2 2 0 114 0m6 0a2 2 0 104 0m-4 0a2 2 0 114 0" },
     { id: "reports", label: "Reports", icon: "M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" },
+    { id: "settings", label: "Settings", icon: "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" },
   ];
 
   const lowStock = inventory.filter(t => t.shopId === SHOP_ID && t.stock <= 10 && t.stock > 0);
@@ -754,9 +1022,19 @@ export default function TilesApp() {
 
   if (!isAuthenticated || !SHOP_ID) {
     return (
-      <LandingPage onLogin={(user) => {
+      <LandingPage onLogin={async (user, newShopName, newShopGst) => {
         // user object passed from handleVerifyOtp
         console.log("Logged in gracefully:", user.uid);
+        SHOP_ID = user.uid;
+        
+        // If this is a new signup, immediately tag the shop name to the cloud document
+        if (newShopName) {
+           const shopRef = doc(db, "shops", SHOP_ID);
+           await setDoc(shopRef, { shopName: newShopName, gst: newShopGst }, { merge: true });
+        }
+        
+        setIsAuthenticated(true);
+        setIsAuthLoading(false);
       }} />
     );
   }
@@ -778,13 +1056,28 @@ export default function TilesApp() {
         <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.85)", zIndex: 100, display: "flex", alignItems: "center", justifyItems: "center", padding: "20px", overflowY: "auto" }}>
           <div style={{ position: "relative", width: "100%", maxWidth: 500, margin: "auto" }}>
             <button onClick={() => setViewedBill(null)} className="no-print" style={{ position: "absolute", top: -40, right: 0, background: "transparent", border: "none", color: "#fff", fontSize: 24, cursor: "pointer" }}>✕</button>
-            <BillPreview bill={viewedBill} onClose={() => setViewedBill(null)} />
+            <BillPreview bill={viewedBill} shopData={shopData} onClose={() => setViewedBill(null)} />
           </div>
         </div>
       )}
 
       {/* SUBSCRIPTION PROMPT MODAL */}
-      {showSubscription && <SubscriptionModal onClose={() => setShowSubscription(false)} />}
+      {showSubscription && <SubscriptionModal 
+        onClose={() => setShowSubscription(false)} 
+        onSuccess={(plan, paymentId) => {
+          console.log(`Successfully upgraded to ${plan} with ID ${paymentId}`);
+          pushToCloud({ 
+            subscription: { 
+              status: "active", 
+              plan: plan, 
+              paymentId: paymentId, 
+              startDate: getLocalDateString() 
+            }
+          });
+          setShowSubscription(false);
+          alert(`Success! Your account is now upgraded to TileSync ${plan.charAt(0).toUpperCase() + plan.slice(1)}.`);
+        }}
+      />}
 
       {/* Header */}
       <div className="header">
@@ -808,17 +1101,6 @@ export default function TilesApp() {
               🚫 {deadStock.length} Out of Stock
             </div>
           )}
-
-          <button
-            onClick={() => {
-              if (window.confirm("Are you sure you want to log out?")) {
-                auth.signOut();
-              }
-            }}
-            style={{ background: "transparent", border: "1px solid #374151", color: "#9ca3af", padding: "6px 12px", borderRadius: 8, fontSize: 12, cursor: "pointer", marginLeft: 8 }}
-          >
-            Log Out
-          </button>
         </div>
       </div>
 
@@ -843,9 +1125,10 @@ export default function TilesApp() {
         {tab === "inventory" && <InventoryTab inventory={inventory.filter(t => t.shopId === SHOP_ID)} onAdd={addInventory} onDelete={deleteInventory} />}
         {tab === "calculator" && <CalculatorTab inventory={inventory.filter(t => t.shopId === SHOP_ID)} />}
         {tab === "returns" && <ReturnsTab sales={sales.filter(s => s.shopId === SHOP_ID)} onProcessReturn={processReturn} />}
-        {tab === "customers" && <CustomersTab customers={customers.filter(c => c.shopId === SHOP_ID)} sales={sales.filter(s => s.shopId === SHOP_ID)} onRecordPayment={recordPayment} onViewBill={(bill) => setViewedBill(bill)} onViewStatement={(cus) => setViewedBill({ isStatement: true, customer: cus, sales: sales.filter(s => s.customerId === cus.id && s.type === "Invoice") })} onDeleteBillItem={deleteBillItem} onDeleteBill={deleteSale} />}
+        {tab === "customers" && <CustomersTab customers={customers.filter(c => c.shopId === SHOP_ID)} sales={sales.filter(s => s.shopId === SHOP_ID)} onRecordPayment={recordPayment} onViewBill={(bill) => setViewedBill(bill)} onViewStatement={(cus) => setViewedBill({ isStatement: true, customer: cus, sales: sales.filter(s => s.customerId === cus.id && s.type === "Invoice") })} onDeleteBillItem={deleteBillItem} onDeleteBill={deleteSale} isPro={isPro} isAutoSmsEnabled={isAutoSmsEnabled} onToggleAutoSms={(val) => { setIsAutoSmsEnabled(val); pushToCloud({ isAutoSmsEnabled: val }); showToast(val ? "🔔 7-Day Auto SMS Enabled!" : "🔕 Auto SMS Disabled"); }} />}
         {tab === "expenses" && <ExpensesTab expenses={expenses.filter(e => e.shopId === SHOP_ID)} onAdd={(e) => { setExpenses(prev => [{ ...e, id: "e" + Date.now(), shopId: SHOP_ID }, ...prev]); showToast("💸 Expense recorded"); }} onDelete={(id) => { setExpenses(prev => prev.filter(e => e.id !== id)); showToast("🗑️ Expense deleted"); }} />}
-        {tab === "purchases" && <PurchasesTab purchases={purchases.filter(p => p.shopId === SHOP_ID)} suppliers={suppliers.filter(s => s.shopId === SHOP_ID)} inventory={inventory.filter(t => t.shopId === SHOP_ID)} onUpdateSupplier={(sup) => setSuppliers(prev => prev.map(s => s.id === sup.id ? sup : s))} onAddPurchase={(p, newTileObj) => {
+        {tab === "purchases" && (
+          <PurchasesTab purchases={purchases.filter(p => p.shopId === SHOP_ID)} suppliers={suppliers.filter(s => s.shopId === SHOP_ID)} inventory={inventory.filter(t => t.shopId === SHOP_ID)} onUpdateSupplier={(sup) => setSuppliers(prev => prev.map(s => s.id === sup.id ? sup : s))} onAddPurchase={(p, newTileObj) => {
           let currentInv = inventory;
           if (newTileObj) {
             currentInv = [...currentInv, newTileObj];
@@ -865,8 +1148,10 @@ export default function TilesApp() {
           }
           setPurchases(prev => [{ ...p, id: "p" + Date.now(), shopId: SHOP_ID, supplierId: supId, date: getLocalDateString() }, ...prev]);
           showToast("📦 Purchase recorded!");
-        }} />}
+        }} />
+        )}
         {tab === "reports" && <ReportsTab sales={sales.filter(s => s.shopId === SHOP_ID)} inventory={inventory.filter(t => t.shopId === SHOP_ID)} expenses={expenses.filter(e => e.shopId === SHOP_ID)} onDelete={deleteSale} />}
+        {tab === "settings" && <SettingsTab shopData={shopData} isPro={isPro} pushToCloud={pushToCloud} onUpgrade={() => setShowSubscription(true)} onLogout={() => { if (window.confirm("Are you sure you want to log out?")) auth.signOut(); }} />}
       </div>
 
       {/* Toast */}
@@ -1243,7 +1528,7 @@ function BillingTab({ inventory, customers, onSave, mViewBill }) {
 }
 
 // ─── BILL PREVIEW ─────────────────────────────────────────────────────────────
-function BillPreview({ bill, onNew, onClose }) {
+function BillPreview({ bill, onNew, onClose, shopData = { name: "TileSync Store", gst: "" } }) {
   const billRef = useRef(null);
   const [isGenerating, setIsGenerating] = useState(false);
 
@@ -1280,13 +1565,14 @@ function BillPreview({ bill, onNew, onClose }) {
   const handleWhatsApp = async () => {
     const pdf = await generatePDF();
     if (pdf) {
+      const safeShopName = shopData.name.replace(/\s+/g, "_");
       if (bill.isStatement) {
-        pdf.save(`Gujrati_Tiles_Statement_${bill.customer.name}.pdf`);
-        const text = encodeURIComponent(`Hello ${bill.customer.name || "Customer"},\n\nThank you for shopping at Gujrati Tiles! Attached is your Account Statement showing a total pending due of ₹${bill.customer.totalPending.toLocaleString("en-IN")}. Please see the downloaded document for full details.\n\nWarm regards,\nGujrati Tiles`);
+        pdf.save(`${safeShopName}_Statement_${bill.customer.name}.pdf`);
+        const text = encodeURIComponent(`Hello ${bill.customer.name || "Customer"},\n\nThank you for shopping at ${shopData.name}! Attached is your Account Statement showing a total pending due of ₹${bill.customer.totalPending.toLocaleString("en-IN")}. Please see the downloaded document for full details.\n\nWarm regards,\n${shopData.name}`);
         window.open(`https://wa.me/${bill.customer.phone || ""}?text=${text}`, "_blank");
       } else {
-        pdf.save(`Gujrati_Tiles_Bill_${bill.billNo}.pdf`);
-        const text = encodeURIComponent(`Hello ${bill.customerName || "Customer"},\n\nThank you for shopping at Gujrati Tiles! Your bill ${bill.billNo} for ₹${bill.net.toFixed(2)} has been saved to your device as a PDF file. Please see the downloaded document for full details.\n\nWarm regards,\nGujrati Tiles`);
+        pdf.save(`${safeShopName}_Bill_${bill.billNo}.pdf`);
+        const text = encodeURIComponent(`Hello ${bill.customerName || "Customer"},\n\nThank you for shopping at ${shopData.name}! Your bill ${bill.billNo} for ₹${bill.net.toFixed(2)} has been saved to your device as a PDF file. Please see the downloaded document for full details.\n\nWarm regards,\n${shopData.name}`);
         window.open(`https://wa.me/${bill.customerPhone || ""}?text=${text}`, "_blank");
       }
     }
@@ -1315,7 +1601,8 @@ function BillPreview({ bill, onNew, onClose }) {
       <div ref={billRef} className="print-section" style={{ background: "#0d1f17", border: "1px solid #166534", borderRadius: 16, padding: 28, maxWidth: 500, margin: "0 auto", color: "#e8e8e8" }}>
         <div style={{ textAlign: "center", marginBottom: 24 }}>
           <div style={{ fontSize: 32, marginBottom: 8 }}>✅</div>
-          <div style={{ fontSize: 24, fontWeight: 700, color: "#fff" }}>Gujrati Tiles</div>
+          <div style={{ fontSize: 24, fontWeight: 700, color: "#fff" }}>{shopData.name}</div>
+          {shopData.gst && <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 4 }}>GSTIN: {shopData.gst}</div>}
           <div style={{ fontSize: 13, color: "#6b7280", marginTop: 4 }}>
             {bill.isStatement ? "Account Statement" : <>Bill No: <span style={{ color: "#f59e0b", fontFamily: "'DM Mono', monospace" }}>{bill.billNo}</span></>}
           </div>
@@ -1376,7 +1663,7 @@ function BillPreview({ bill, onNew, onClose }) {
         )}
 
         <div className="print-thank-you" style={{ textAlign: "center", fontSize: 13, color: "#10b981", marginTop: 24, fontWeight: 600 }}>
-          Thank you for choosing Gujrati Tiles!
+          Thank you for choosing {shopData.name}!
         </div>
       </div>
 
@@ -1593,9 +1880,11 @@ function CalculatorTab({ inventory }) {
 }
 
 // ─── CUSTOMERS & CRM TAB ─────────────────────────────────────────────────────
-function CustomersTab({ customers, sales, onRecordPayment, onViewStatement, onUpdateCustomer, onViewBill, onDeleteBillItem, onDeleteBill }) {
+function CustomersTab({ customers, sales, onRecordPayment, onViewStatement, onUpdateCustomer, onViewBill, onDeleteBillItem, onDeleteBill, isPro, isAutoSmsEnabled, onToggleAutoSms }) {
   const [selectedCustomerId, setSelectedCustomerId] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [showSmsLogs, setShowSmsLogs] = useState(false);
+  const smsHistory = sales.filter(s => s.lastRemindedDate).sort((a,b) => new Date(b.lastRemindedDate).getTime() - new Date(a.lastRemindedDate).getTime());
 
   const selectedCustomer = customers.find(c => c.id === selectedCustomerId);
   const customerSales = selectedCustomer ? sales.filter(s => s.customerId === selectedCustomer.id && s.type === "Invoice") : [];
@@ -1699,12 +1988,58 @@ function CustomersTab({ customers, sales, onRecordPayment, onViewStatement, onUp
 
   return (
     <div>
+      {showSmsLogs && (
+        <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.8)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, backdropFilter: "blur(4px)" }}>
+          <div style={{ background: "#12151f", border: "1px solid #2a2d3e", borderRadius: 16, padding: 24, width: "100%", maxWidth: 600, maxHeight: "80vh", overflowY: "auto", boxShadow: "0 20px 25px -5px rgba(0, 0, 0, 0.5)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 20, alignItems: "center" }}>
+              <div style={{ fontSize: 20, fontWeight: 700, color: "#fff" }}>SMS Reminder Logs</div>
+              <button onClick={() => setShowSmsLogs(false)} style={{ background: "transparent", color: "#9ca3af", border: "none", fontSize: 24, cursor: "pointer", lineHeight: 1 }}>&times;</button>
+            </div>
+            
+            <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 20 }}>
+              This list details all customers who have automatically received a 7-Day overdue payment reminder via Fast2SMS.
+            </div>
+
+            {smsHistory.length === 0 ? (
+              <div style={{ color: "#6b7280", textAlign: "center", padding: 40, background: "#1a1d2e", borderRadius: 12, border: "1px dashed #2a2d3e" }}>No SMS reminders have been sent automatically yet.</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                {smsHistory.map(bill => {
+                   const c = customers.find(c => c.id === bill.customerId);
+                   return (
+                     <div key={bill.id} style={{ background: "#1a1d2e", padding: 16, borderRadius: 10, border: "1px solid #2a2d3e", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                       <div>
+                         <div style={{ color: "#e8e8e8", fontWeight: 600, marginBottom: 4 }}>{c ? c.name : "Unknown Customer"}</div>
+                         <div style={{ fontSize: 13, color: "#9ca3af" }}>Bill No: <span style={{ color: "#f59e0b", fontFamily: "'DM Mono', monospace" }}>{bill.billNo}</span>  •  Sent: {bill.lastRemindedDate}</div>
+                       </div>
+                       <div style={{ textAlign: "right" }}>
+                         <div style={{ color: "#6b7280", fontSize: 12, marginBottom: 4 }}>Reminder For</div>
+                         <div style={{ color: "#f87171", fontFamily: "'DM Mono', monospace", fontWeight: 700 }}>₹{bill.pending.toFixed(2)} Due</div>
+                       </div>
+                     </div>
+                   );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="flex-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
         <div>
           <div style={{ fontSize: 20, fontWeight: 700, color: "#fff", marginBottom: 4 }}>Customer Directory Dashboard</div>
           <div style={{ fontSize: 13, color: "#6b7280" }}>{customers.length} total customers · ₹{customers.reduce((s, c) => s + c.totalPending, 0).toLocaleString("en-IN")} pending in market</div>
         </div>
-        <div>
+        <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+          {isPro && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, background: "#1a1d2e", padding: "8px 12px", borderRadius: 8, border: "1px solid #2a2d3e" }}>
+              <span style={{ fontSize: 13, color: "#9ca3af", fontWeight: 500 }}>Auto-Reminders</span>
+              <div onClick={() => onToggleAutoSms(!isAutoSmsEnabled)} style={{ width: 40, height: 20, background: isAutoSmsEnabled ? "#10b981" : "#374151", borderRadius: 20, position: "relative", cursor: "pointer", transition: "background 0.3s" }} title="Send automatic SMS to 7-Day overdue customers">
+                <div style={{ position: "absolute", top: 2, left: isAutoSmsEnabled ? 22 : 2, width: 16, height: 16, background: "#fff", borderRadius: "50%", transition: "left 0.3s" }}></div>
+              </div>
+              <button onClick={() => setShowSmsLogs(true)} style={{ marginLeft: 8, background: "transparent", border: "1px dashed #6366f1", color: "#818cf8", fontSize: 12, padding: "4px 8px", borderRadius: 6, cursor: "pointer", transition: "all 0.2s" }} onMouseEnter={e => e.target.style.background = "rgba(99,102,241,0.1)"} onMouseLeave={e => e.target.style.background = "transparent"}>📜 View Logs</button>
+            </div>
+          )}
           <input
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
@@ -2388,3 +2723,49 @@ const qtyBtnStyle = {
   background: "#1a1d2e", color: "#fff", fontSize: 18, cursor: "pointer",
   display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'DM Sans', sans-serif"
 };
+
+// ─── SETTINGS TAB ───────────────────────────────────────────────────────────
+function SettingsTab({ shopData, isPro, pushToCloud, onUpgrade, onLogout }) {
+  const [name, setName] = useState(shopData?.name || "");
+  const [gst, setGst] = useState(shopData?.gst || "");
+
+  const handleSave = () => {
+     pushToCloud({ shopName: name, gst: gst });
+     alert("Firm details updated successfully!");
+  };
+
+  return (
+    <div style={{ maxWidth: 600, margin: "0 auto", padding: 20 }}>
+       <h2 style={{ color: "#fff", marginBottom: 24, fontSize: 24, fontWeight: 700 }}>Showroom Settings</h2>
+       
+       <div style={{ background: "#1a1d2e", padding: "24px", borderRadius: 16, border: "1px solid #2a2d3e", marginBottom: 24 }}>
+         <h3 style={{ color: "#e8e8e8", marginTop: 0, marginBottom: 16, fontSize: 18 }}>Business Identity</h3>
+         <div style={{ marginBottom: 16 }}>
+           <label style={labelStyle}>Showroom / Firm Name</label>
+           <input type="text" value={name} onChange={e => setName(e.target.value)} style={inputStyle} placeholder="e.g. M/S Sharma Tiles" />
+         </div>
+         <div style={{ marginBottom: 16 }}>
+           <label style={labelStyle}>GST Number (Optional)</label>
+           <input type="text" value={gst} onChange={e => setGst(e.target.value)} style={inputStyle} placeholder="15 alphanumeric characters" />
+         </div>
+         <button onClick={handleSave} style={{ ...btnStyle, background: "#f59e0b", color: "#000", fontWeight: 700, width: "100%", marginTop: 8 }}>Save Firm Details</button>
+         <p style={{ color: "#6b7280", fontSize: 12, marginTop: 12, textAlign: "center" }}>These details appear on your printed bills and WhatsApp statements.</p>
+       </div>
+
+       <div style={{ background: "#1a1d2e", padding: "24px", borderRadius: 16, border: "1px solid #2a2d3e", marginBottom: 24 }}>
+          <h3 style={{ color: "#e8e8e8", marginTop: 0, marginBottom: 16, fontSize: 18 }}>Subscription Plan</h3>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#12151f", padding: 16, borderRadius: 12, border: "1px solid #2a2d3e" }}>
+            <span style={{ color: isPro ? "#10b981" : "#f59e0b", fontWeight: 700, fontSize: 16, display: "flex", alignItems: "center", gap: 8 }}>
+               {isPro ? "⭐ TileSync Pro" : "Free Trial"}
+            </span>
+            {!isPro && (
+               <button onClick={onUpgrade} style={{ ...btnStyle, background: "linear-gradient(135deg, #f59e0b, #ef4444)", color: "#fff", fontWeight: 700, padding: "8px 16px" }}>Upgrade Now</button>
+            )}
+          </div>
+          {isPro && <p style={{ color: "#9ca3af", fontSize: 13, marginTop: 12 }}>You have an active Pro subscription with unlimited invoices and SMS reminders enabled.</p>}
+       </div>
+
+       <button onClick={onLogout} style={{ ...btnStyle, background: "transparent", border: "1px solid #ef4444", color: "#f87171", width: "100%", fontWeight: 700, padding: 16 }}>Securely Sign Out</button>
+    </div>
+  )
+}
