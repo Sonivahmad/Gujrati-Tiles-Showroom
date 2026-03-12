@@ -5,6 +5,7 @@ import { auth, db } from "./firebase";
 import { RecaptchaVerifier, signInWithPhoneNumber, onAuthStateChanged, setPersistence, browserLocalPersistence } from "firebase/auth";
 import { doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
 import { sendReminderSms } from "./utils/sms";
+import { t } from "./utils/translations";
 
 const getLocalDateString = () => {
   const d = new Date();
@@ -73,6 +74,7 @@ function LandingPage({ onLogin }) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [resendCooldown, setResendCooldown] = useState(0);
   const [statusMsg, setStatusMsg] = useState("");
+  const [showNoAccountModal, setShowNoAccountModal] = useState(false);
 
   // Persist recaptchaVerifier across renders with a ref to avoid "already rendered" errors
   const recaptchaVerifierRef = useRef(null);
@@ -101,6 +103,13 @@ function LandingPage({ onLogin }) {
         window.recaptchaVerifier.clear();
         window.recaptchaVerifier = null;
       }
+    } catch (e) {
+      // Ignore
+    }
+    // Force-wipe the DOM element so Firebase doesn't see a "already rendered" widget
+    try {
+      const el = document.getElementById("recaptcha-container");
+      if (el) el.innerHTML = "";
     } catch (e) {
       // Ignore
     }
@@ -147,11 +156,11 @@ function LandingPage({ onLogin }) {
   };
 
   const sendOtp = async (phoneNumber) => {
-    // Always clear the old verifier before creating a new one
+    // Always fully clear the old verifier + DOM before creating a new one
     _clearRecaptcha();
 
-    // Small delay to ensure DOM is ready after clearing
-    await new Promise(res => setTimeout(res, 100));
+    // Increased delay — gives the DOM time to fully settle after innerHTML wipe
+    await new Promise(res => setTimeout(res, 400));
 
     const verifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
       'size': 'invisible',
@@ -163,6 +172,11 @@ function LandingPage({ onLogin }) {
     recaptchaVerifierRef.current = verifier;
 
     const result = await signInWithPhoneNumber(auth, phoneNumber, verifier);
+
+    // The reCAPTCHA token is one-time-use — discard the verifier immediately after
+    // signInWithPhoneNumber so the next OTP send starts completely fresh.
+    _clearRecaptcha();
+
     return result;
   };
 
@@ -187,6 +201,7 @@ function LandingPage({ onLogin }) {
       let msg = "Error sending OTP. Please try again.";
       if (error.code === "auth/too-many-requests") msg = "Too many attempts. Please wait a few minutes before trying again.";
       else if (error.code === "auth/invalid-phone-number") msg = "Invalid phone number. Please check and try again.";
+      else if (error.code === "auth/invalid-app-credential") msg = "reCAPTCHA verification failed. Please refresh the page and try again.";
       else if (error.message) msg = error.message;
       alert(msg);
       setIsLoading(false);
@@ -274,8 +289,13 @@ function LandingPage({ onLogin }) {
           setStatusMsg(`✅ Welcome back, ${existingShopName}!`);
           setTimeout(() => onLogin(user), 800);
         } else {
-          // New number tried to login — create account for them
-          onLogin(user, phone + " Store", "");
+          // No account found — sign out Firebase and show professional modal
+          await auth.signOut();
+          setIsLoading(false);
+          setStep(1);
+          setOtp(["", "", "", "", "", ""]);
+          setShowNoAccountModal(true);
+          return;
         }
       }
     } catch (error) {
@@ -290,6 +310,56 @@ function LandingPage({ onLogin }) {
 
   return (
     <div className="landing-container" id="home">
+
+      {/* ── NO ACCOUNT FOUND MODAL ── */}
+      {showNoAccountModal && (
+        <div style={{
+          position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
+          background: "rgba(0,0,0,0.75)", backdropFilter: "blur(6px)",
+          zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20
+        }}>
+          <div style={{
+            background: "#12151f", border: "1px solid #2a2d3e", borderRadius: 24,
+            padding: "40px 32px", maxWidth: 420, width: "100%",
+            textAlign: "center", boxShadow: "0 24px 64px rgba(0,0,0,0.6)",
+            animation: "fadeIn 0.25s ease"
+          }}>
+            <div style={{ fontSize: 56, marginBottom: 16 }}>🔍</div>
+            <h2 style={{ fontSize: 22, fontWeight: 800, color: "#fff", marginBottom: 10 }}>
+              No Account Found
+            </h2>
+            <p style={{ fontSize: 14, color: "#9ca3af", lineHeight: 1.7, marginBottom: 28 }}>
+              The mobile number <span style={{ color: "#f59e0b", fontWeight: 600 }}>+91 {phone}</span> is not registered on TileSync yet.<br />
+              Please <strong style={{ color: "#fff" }}>create an account</strong> first to get started.
+            </p>
+            <button
+              onClick={() => {
+                setShowNoAccountModal(false);
+                openAuth("signup");
+              }}
+              style={{
+                width: "100%", padding: "14px", marginBottom: 12,
+                background: "linear-gradient(135deg, #f59e0b, #d97706)",
+                border: "none", borderRadius: 10, fontSize: 15,
+                fontWeight: 700, color: "#000", cursor: "pointer"
+              }}
+            >
+              ✨ Create Account (Sign Up)
+            </button>
+            <button
+              onClick={() => setShowNoAccountModal(false)}
+              style={{
+                width: "100%", padding: "12px",
+                background: "transparent", border: "1px solid #374151",
+                borderRadius: 10, fontSize: 14, color: "#6b7280", cursor: "pointer"
+              }}
+            >
+              Try a Different Number
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* PERSISTENT NAVBAR */}
       <nav className="landing-nav">
         <div className="landing-logo" style={{ cursor: "pointer" }} onClick={(e) => handleNavClick(e, "home")}>
@@ -327,7 +397,7 @@ function LandingPage({ onLogin }) {
                     <div className="auth-input-group">
                       <label>🏪 Shop / Showroom Name *</label>
                       <div className="phone-input-wrapper">
-                        <input type="text" value={shopName} onChange={e => setShopName(e.target.value)} placeholder="e.g. Gujrati Tiles" autoFocus required />
+                        <input type="text" value={shopName} onChange={e => setShopName(e.target.value)} placeholder="e.g. My Tile Showroom" autoFocus required />
                       </div>
                     </div>
                     <div className="auth-input-group">
@@ -511,7 +581,7 @@ function LandingPage({ onLogin }) {
               <span onClick={() => alert("Terms strictly enforced.")}>Terms of Service</span>
               <span onClick={() => window.open('mailto:support@tilesync.com')}>Contact ✉️</span>
             </div>
-            <p>&copy; 2026 TileSync SaaS by Gujrati Tiles Demo. All rights reserved.</p>
+            <p>&copy; 2026 TileSync. All rights reserved.</p>
           </footer>
         </>
       )}
@@ -648,6 +718,7 @@ export default function TilesApp() {
   const [isAutoSmsEnabled, setIsAutoSmsEnabled] = useState(false);
   const [viewedBill, setViewedBill] = useState(null);
   const [shopData, setShopData] = useState({ name: "TileSync Store", gst: "" });
+  const [language, setLanguage] = useState("en"); // "en" | "hi" | "hl"
 
   useEffect(() => {
     if (!SHOP_ID) return;
@@ -673,6 +744,7 @@ export default function TilesApp() {
 
         // Load custom shop meta
         setShopData({ name: data.shopName || "TileSync Store", gst: data.gst || "" });
+        setLanguage(data.language || "en");
 
         // Auto SMS is ONLY available for the "pro" plan. 
         if (data.subscription && data.subscription.plan === "pro") {
@@ -1112,15 +1184,15 @@ export default function TilesApp() {
   };
 
   const tabs = [
-    { id: "billing", label: "Billing / Est.", icon: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" },
-    { id: "inventory", label: "Stock", icon: "M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" },
-    { id: "calculator", label: "Calculator", icon: "M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 11h.01M12 11h.01M15 11h.01M4 19h16a2 2 0 002-2V7a2 2 0 00-2-2H4a2 2 0 00-2 2v10a2 2 0 002 2z" },
-    { id: "returns", label: "Returns", icon: "M16 15v-1a4 4 0 00-4-4H8m0 0l3 3m-3-3l3-3m9 14V5a2 2 0 00-2-2H6a2 2 0 00-2 2v16l4-2 4 2 4-2 4 2z" },
-    { id: "customers", label: "Customers", icon: "M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" },
-    { id: "expenses", label: "Expenses", icon: "M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" },
-    { id: "purchases", label: "Purchases", icon: "M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0z M13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10a1 1 0 001 1h1m8-1a1 1 0 01-1 1H9m4-1V8a1 1 0 011-1h2.586a1 1 0 01.707.293l3.414 3.414a1 1 0 01.293.707V16a1 1 0 01-1 1h-1m-6-1a1 1 0 001 1h1M5 17a2 2 0 104 0m-4 0a2 2 0 114 0m6 0a2 2 0 104 0m-4 0a2 2 0 114 0" },
-    { id: "reports", label: "Reports", icon: "M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" },
-    { id: "settings", label: "Settings", icon: "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" },
+    { id: "billing",   label: t(language, "billing"),   icon: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" },
+    { id: "inventory", label: t(language, "stock"),     icon: "M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" },
+    { id: "calculator",label: t(language, "calculator"),icon: "M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 11h.01M12 11h.01M15 11h.01M4 19h16a2 2 0 002-2V7a2 2 0 00-2-2H4a2 2 0 00-2 2v10a2 2 0 002 2z" },
+    { id: "returns",   label: t(language, "returns"),   icon: "M16 15v-1a4 4 0 00-4-4H8m0 0l3 3m-3-3l3-3m9 14V5a2 2 0 00-2-2H6a2 2 0 00-2 2v16l4-2 4 2 4-2 4 2z" },
+    { id: "customers", label: t(language, "customers"), icon: "M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" },
+    { id: "expenses",  label: t(language, "expenses"),  icon: "M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" },
+    { id: "purchases", label: t(language, "purchases"), icon: "M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0z M13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10a1 1 0 001 1h1m8-1a1 1 0 01-1 1H9m4-1V8a1 1 0 011-1h2.586a1 1 0 01.707.293l3.414 3.414a1 1 0 01.293.707V16a1 1 0 01-1 1h-1m-6-1a1 1 0 001 1h1M5 17a2 2 0 104 0m-4 0a2 2 0 114 0m6 0a2 2 0 104 0m-4 0a2 2 0 114 0" },
+    { id: "reports",   label: t(language, "reports"),   icon: "M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" },
+    { id: "settings",  label: t(language, "settings"),  icon: "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" },
   ];
 
   const lowStock = inventory.filter(t => t.shopId === SHOP_ID && t.stock <= 10 && t.stock > 0);
@@ -1195,20 +1267,20 @@ export default function TilesApp() {
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <div style={{ width: 36, height: 36, background: "linear-gradient(135deg, #f59e0b, #ef4444)", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🪨</div>
             <div>
-              <div style={{ fontWeight: 700, fontSize: 16, color: "#fff", letterSpacing: "-0.3px" }}>Gujrati Tiles</div>
-              <div style={{ fontSize: 11, color: "#6b7280" }}>Showroom Management</div>
+              <div style={{ fontWeight: 700, fontSize: 16, color: "#fff", letterSpacing: "-0.3px" }}>{shopData.name}</div>
+              <div style={{ fontSize: 11, color: "#6b7280" }}>{t(language, "showroomManagement")}</div>
             </div>
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {lowStock.length > 0 && (
             <div style={{ background: "#451a03", border: "1px solid #92400e", borderRadius: 20, padding: "4px 10px", fontSize: 11, color: "#fbbf24", display: "flex", alignItems: "center", gap: 4 }}>
-              ⚠️ {lowStock.length} Low Stock
+              ⚠️ {lowStock.length} {t(language, "lowStock")}
             </div>
           )}
           {deadStock.length > 0 && (
             <div style={{ background: "#1f1315", border: "1px solid #7f1d1d", borderRadius: 20, padding: "4px 10px", fontSize: 11, color: "#f87171", display: "flex", alignItems: "center", gap: 4 }}>
-              🚫 {deadStock.length} Out of Stock
+              🚫 {deadStock.length} {t(language, "outOfStock")}
             </div>
           )}
         </div>
@@ -1231,7 +1303,7 @@ export default function TilesApp() {
 
       {/* Content */}
       <div className="content-wrapper">
-        {tab === "billing" && <BillingTab inventory={inventory.filter(t => t.shopId === SHOP_ID)} customers={customers.filter(c => c.shopId === SHOP_ID)} onSave={addSale} mViewBill={(bill) => setViewedBill(bill)} />}
+        {tab === "billing" && <BillingTab inventory={inventory.filter(t => t.shopId === SHOP_ID)} customers={customers.filter(c => c.shopId === SHOP_ID)} onSave={addSale} mViewBill={(bill) => setViewedBill(bill)} shopData={shopData} />}
         {tab === "inventory" && <InventoryTab inventory={inventory.filter(t => t.shopId === SHOP_ID)} onAdd={addInventory} onDelete={deleteInventory} />}
         {tab === "calculator" && <CalculatorTab inventory={inventory.filter(t => t.shopId === SHOP_ID)} />}
         {tab === "returns" && <ReturnsTab sales={sales.filter(s => s.shopId === SHOP_ID)} onProcessReturn={processReturn} />}
@@ -1261,7 +1333,7 @@ export default function TilesApp() {
           }} />
         )}
         {tab === "reports" && <ReportsTab sales={sales.filter(s => s.shopId === SHOP_ID)} inventory={inventory.filter(t => t.shopId === SHOP_ID)} expenses={expenses.filter(e => e.shopId === SHOP_ID)} onDelete={deleteSale} />}
-        {tab === "settings" && <SettingsTab shopData={shopData} isPro={isPro} pushToCloud={pushToCloud} onUpgrade={() => setShowSubscription(true)} onLogout={() => { if (window.confirm("Are you sure you want to log out?")) auth.signOut(); }} />}
+        {tab === "settings" && <SettingsTab shopData={shopData} isPro={isPro} pushToCloud={pushToCloud} language={language} onLanguageChange={(lang) => { setLanguage(lang); pushToCloud({ language: lang }); }} onUpgrade={() => setShowSubscription(true)} onLogout={() => { if (window.confirm("Are you sure you want to log out?")) auth.signOut(); }} />}
       </div>
 
       {/* Toast */}
@@ -1281,7 +1353,7 @@ export default function TilesApp() {
 }
 
 // ─── BILLING TAB ─────────────────────────────────────────────────────────────
-function BillingTab({ inventory, customers, onSave, mViewBill }) {
+function BillingTab({ inventory, customers, onSave, mViewBill, shopData = { name: "TileSync Store", gst: "" } }) {
   const [docType, setDocType] = useState("Invoice"); // Invoice or Estimate
 
   const [customerName, setCustomerName] = useState("");
@@ -1402,7 +1474,7 @@ function BillingTab({ inventory, customers, onSave, mViewBill }) {
     setCart([]); setDiscount(0); setSearch(""); setAmountPaid("");
   };
 
-  if (billDone) return <BillPreview bill={billDone} onNew={() => setBillDone(null)} />;
+  if (billDone) return <BillPreview bill={billDone} onNew={() => setBillDone(null)} shopData={shopData} />;
 
   return (
     <div className="billing-layout">
@@ -1774,6 +1846,9 @@ function BillPreview({ bill, onNew, onClose, shopData = { name: "TileSync Store"
 
         <div className="print-thank-you" style={{ textAlign: "center", fontSize: 13, color: "#10b981", marginTop: 24, fontWeight: 600 }}>
           Thank you for choosing {shopData.name}!
+        </div>
+        <div style={{ textAlign: "center", fontSize: 11, color: "#4b5563", marginTop: 12, borderTop: "1px dashed #1e2130", paddingTop: 10, letterSpacing: "0.3px" }}>
+          Powered by <span style={{ color: "#f59e0b", fontWeight: 600 }}>TileSync</span>
         </div>
       </div>
 
@@ -2835,7 +2910,7 @@ const qtyBtnStyle = {
 };
 
 // ─── SETTINGS TAB ───────────────────────────────────────────────────────────
-function SettingsTab({ shopData, isPro, pushToCloud, onUpgrade, onLogout }) {
+function SettingsTab({ shopData, isPro, pushToCloud, language = "en", onLanguageChange, onUpgrade, onLogout }) {
   const [name, setName] = useState(shopData?.name || "");
   const [gst, setGst] = useState(shopData?.gst || "");
 
@@ -2844,10 +2919,17 @@ function SettingsTab({ shopData, isPro, pushToCloud, onUpgrade, onLogout }) {
     alert("Firm details updated successfully!");
   };
 
+  const langOptions = [
+    { code: "en", label: "🇬🇧 English", desc: "English" },
+    { code: "hi", label: "🇮🇳 हिंदी", desc: "Hindi" },
+    { code: "hl", label: "🤝 Hinglish", desc: "Roman Hindi" },
+  ];
+
   return (
     <div style={{ maxWidth: 600, margin: "0 auto", padding: 20 }}>
       <h2 style={{ color: "#fff", marginBottom: 24, fontSize: 24, fontWeight: 700 }}>Showroom Settings</h2>
 
+      {/* Business Identity */}
       <div style={{ background: "#1a1d2e", padding: "24px", borderRadius: 16, border: "1px solid #2a2d3e", marginBottom: 24 }}>
         <h3 style={{ color: "#e8e8e8", marginTop: 0, marginBottom: 16, fontSize: 18 }}>Business Identity</h3>
         <div style={{ marginBottom: 16 }}>
@@ -2862,6 +2944,37 @@ function SettingsTab({ shopData, isPro, pushToCloud, onUpgrade, onLogout }) {
         <p style={{ color: "#6b7280", fontSize: 12, marginTop: 12, textAlign: "center" }}>These details appear on your printed bills and WhatsApp statements.</p>
       </div>
 
+      {/* Language Picker */}
+      <div style={{ background: "#1a1d2e", padding: "24px", borderRadius: 16, border: "1px solid #2a2d3e", marginBottom: 24 }}>
+        <h3 style={{ color: "#e8e8e8", marginTop: 0, marginBottom: 6, fontSize: 18 }}>🌐 App Language</h3>
+        <p style={{ color: "#6b7280", fontSize: 13, marginBottom: 18, marginTop: 0 }}>Choose the language for navigation tabs and app interface.</p>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+          {langOptions.map(opt => (
+            <button
+              key={opt.code}
+              onClick={() => onLanguageChange(opt.code)}
+              style={{
+                padding: "14px 10px", borderRadius: 12, border: "2px solid",
+                borderColor: language === opt.code ? "#f59e0b" : "#2a2d3e",
+                background: language === opt.code ? "rgba(245,158,11,0.1)" : "#12151f",
+                color: language === opt.code ? "#f59e0b" : "#9ca3af",
+                cursor: "pointer", textAlign: "center",
+                fontFamily: "'DM Sans', sans-serif",
+                transition: "all 0.2s",
+                fontWeight: language === opt.code ? 700 : 500,
+              }}
+            >
+              <div style={{ fontSize: 22, marginBottom: 6 }}>{opt.label.split(" ")[0]}</div>
+              <div style={{ fontSize: 13 }}>{opt.desc}</div>
+              {language === opt.code && (
+                <div style={{ fontSize: 10, color: "#f59e0b", marginTop: 4, fontWeight: 700 }}>✓ Active</div>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Subscription Plan */}
       <div style={{ background: "#1a1d2e", padding: "24px", borderRadius: 16, border: "1px solid #2a2d3e", marginBottom: 24 }}>
         <h3 style={{ color: "#e8e8e8", marginTop: 0, marginBottom: 16, fontSize: 18 }}>Subscription Plan</h3>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#12151f", padding: 16, borderRadius: 12, border: "1px solid #2a2d3e" }}>
@@ -2879,3 +2992,4 @@ function SettingsTab({ shopData, isPro, pushToCloud, onUpgrade, onLogout }) {
     </div>
   )
 }
+
