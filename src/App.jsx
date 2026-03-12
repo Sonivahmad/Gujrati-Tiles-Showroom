@@ -88,6 +88,30 @@ function LandingPage({ onLogin }) {
     };
   }, []);
 
+  // Pre-initialize RecaptchaVerifier as soon as the auth panel opens
+  // so it's ready BEFORE the user clicks "Send OTP"
+  useEffect(() => {
+    if (!showAuth) return;
+    // Small timeout to let the DOM render the recaptcha-container div
+    const t = setTimeout(() => {
+      try {
+        if (!recaptchaVerifierRef.current) {
+          const verifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
+            size: 'invisible',
+            callback: () => {},
+            'expired-callback': () => { _clearRecaptcha(); },
+          });
+          verifier.render(); // pre-warm the reCAPTCHA token
+          recaptchaVerifierRef.current = verifier;
+        }
+      } catch (e) {
+        // Will be created fresh in sendOtp if this fails
+        recaptchaVerifierRef.current = null;
+      }
+    }, 100);
+    return () => clearTimeout(t);
+  }, [showAuth]);
+
   const _clearRecaptcha = () => {
     try {
       if (recaptchaVerifierRef.current) {
@@ -156,25 +180,25 @@ function LandingPage({ onLogin }) {
   };
 
   const sendOtp = async (phoneNumber) => {
-    // Always fully clear the old verifier + DOM before creating a new one
-    _clearRecaptcha();
+    // Reuse the pre-initialized verifier if available, otherwise create a new one
+    let verifier = recaptchaVerifierRef.current;
 
-    // Increased delay — gives the DOM time to fully settle after innerHTML wipe
-    await new Promise(res => setTimeout(res, 400));
-
-    const verifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
-      'size': 'invisible',
-      'callback': () => { },
-      'expired-callback': () => {
-        _clearRecaptcha();
-      }
-    });
-    recaptchaVerifierRef.current = verifier;
+    if (!verifier) {
+      // Fallback: verifier wasn't pre-initialized, create it now
+      _clearRecaptcha();
+      await new Promise(res => setTimeout(res, 150)); // minimal wait for DOM
+      verifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
+        size: 'invisible',
+        callback: () => {},
+        'expired-callback': () => { _clearRecaptcha(); },
+      });
+      await verifier.render();
+      recaptchaVerifierRef.current = verifier;
+    }
 
     const result = await signInWithPhoneNumber(auth, phoneNumber, verifier);
 
-    // The reCAPTCHA token is one-time-use — discard the verifier immediately after
-    // signInWithPhoneNumber so the next OTP send starts completely fresh.
+    // The reCAPTCHA token is one-time-use — discard after use so next send starts fresh
     _clearRecaptcha();
 
     return result;
