@@ -70,8 +70,55 @@ function LandingPage({ onLogin }) {
   const [otp, setOtp] = useState(["", "", "", "", "", ""]);
   const [isLoading, setIsLoading] = useState(false);
   const [confirmationResult, setConfirmationResult] = useState(null);
-  const [recaptchaVerifier, setRecaptchaVerifier] = useState(null);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(0);
+  const [statusMsg, setStatusMsg] = useState("");
+
+  // Persist recaptchaVerifier across renders with a ref to avoid "already rendered" errors
+  const recaptchaVerifierRef = useRef(null);
+  const resendTimerRef = useRef(null);
+
+  // Cleanup verifier on unmount
+  useEffect(() => {
+    return () => {
+      _clearRecaptcha();
+      if (resendTimerRef.current) clearInterval(resendTimerRef.current);
+    };
+  }, []);
+
+  const _clearRecaptcha = () => {
+    try {
+      if (recaptchaVerifierRef.current) {
+        recaptchaVerifierRef.current.clear();
+        recaptchaVerifierRef.current = null;
+      }
+    } catch (e) {
+      // Ignore clear errors
+    }
+    // Also clean up any lingering global ref
+    try {
+      if (window.recaptchaVerifier) {
+        window.recaptchaVerifier.clear();
+        window.recaptchaVerifier = null;
+      }
+    } catch (e) {
+      // Ignore
+    }
+  };
+
+  const startResendCooldown = () => {
+    setResendCooldown(30);
+    if (resendTimerRef.current) clearInterval(resendTimerRef.current);
+    resendTimerRef.current = setInterval(() => {
+      setResendCooldown(prev => {
+        if (prev <= 1) {
+          clearInterval(resendTimerRef.current);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  };
 
   const openAuth = (mode) => {
     setAuthMode(mode);
@@ -80,6 +127,9 @@ function LandingPage({ onLogin }) {
     setShopName("");
     setGst("");
     setOtp(["", "", "", "", "", ""]);
+    setStatusMsg("");
+    setResendCooldown(0);
+    _clearRecaptcha();
     setShowAuth(true);
   };
 
@@ -96,59 +146,94 @@ function LandingPage({ onLogin }) {
     }
   };
 
+  const sendOtp = async (phoneNumber) => {
+    // Always clear the old verifier before creating a new one
+    _clearRecaptcha();
+
+    // Small delay to ensure DOM is ready after clearing
+    await new Promise(res => setTimeout(res, 100));
+
+    const verifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
+      'size': 'invisible',
+      'callback': () => {},
+      'expired-callback': () => {
+        _clearRecaptcha();
+      }
+    });
+    recaptchaVerifierRef.current = verifier;
+
+    const result = await signInWithPhoneNumber(auth, phoneNumber, verifier);
+    return result;
+  };
+
   const handleSendOtp = async (e) => {
     e.preventDefault();
     if (authMode === "signup" && !shopName.trim()) return alert("Please enter your Shop Name");
     if (phone.length < 10) return alert("Please enter a valid 10-digit mobile number");
 
     setIsLoading(true);
-    let formattedPhone = "+91" + phone;
+    setStatusMsg("");
+    const formattedPhone = "+91" + phone;
 
     try {
-      if (!window.recaptchaVerifier) {
-        window.recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
-          'size': 'invisible',
-          'callback': (response) => {
-            // reCAPTCHA solved, allow signInWithPhoneNumber.
-          },
-          'expired-callback': () => {
-             // Response expired. Ask user to solve reCAPTCHA again.
-             if (window.recaptchaVerifier) window.recaptchaVerifier.clear();
-             window.recaptchaVerifier = null;
-          }
-        });
-      }
-      
-      const appVerifier = window.recaptchaVerifier;
-      // Pre-render is automatically handled by signInWithPhoneNumber.
-      // Explicitly calling render() here breaks testing bypass & throws MALFORMED errors.
-      
-      const result = await signInWithPhoneNumber(auth, formattedPhone, appVerifier);
+      const result = await sendOtp(formattedPhone);
       setConfirmationResult(result);
       setStep(2);
+      startResendCooldown();
       setIsLoading(false);
     } catch (error) {
       console.error("SMS Error:", error);
-      
-      // If the recaptcha failed or detached, reset it forcefully so they can try again
-      if (window.recaptchaVerifier) {
-         window.recaptchaVerifier.clear();
-         window.recaptchaVerifier = null;
-      }
-      
-      alert("Error sending OTP: " + error.message);
+      _clearRecaptcha();
+      let msg = "Error sending OTP. Please try again.";
+      if (error.code === "auth/too-many-requests") msg = "Too many attempts. Please wait a few minutes before trying again.";
+      else if (error.code === "auth/invalid-phone-number") msg = "Invalid phone number. Please check and try again.";
+      else if (error.message) msg = error.message;
+      alert(msg);
+      setIsLoading(false);
+    }
+  };
+
+  const handleResendOtp = async () => {
+    if (resendCooldown > 0) return;
+    setIsLoading(true);
+    setStatusMsg("");
+    const formattedPhone = "+91" + phone;
+    try {
+      const result = await sendOtp(formattedPhone);
+      setConfirmationResult(result);
+      setOtp(["", "", "", "", "", ""]);
+      startResendCooldown();
+      setStatusMsg("✅ New OTP sent successfully!");
+      setIsLoading(false);
+      document.getElementById("otp-0")?.focus();
+    } catch (error) {
+      console.error("Resend OTP Error:", error);
+      _clearRecaptcha();
+      alert("Failed to resend OTP. Please try again.");
       setIsLoading(false);
     }
   };
 
   const handleOtpChange = (index, value) => {
+    // Support paste of full 6-digit code into first box
+    if (value.length === 6 && index === 0) {
+      const digits = value.split("").slice(0, 6);
+      setOtp(digits);
+      document.getElementById(`otp-5`)?.focus();
+      return;
+    }
     if (value.length > 1) return;
     const newOtp = [...otp];
     newOtp[index] = value;
     setOtp(newOtp);
     if (value && index < 5) {
-      const nextInput = document.getElementById(`otp-${index + 1}`);
-      if (nextInput) nextInput.focus();
+      document.getElementById(`otp-${index + 1}`)?.focus();
+    }
+  };
+
+  const handleOtpKeyDown = (index, e) => {
+    if (e.key === "Backspace" && !otp[index] && index > 0) {
+      document.getElementById(`otp-${index - 1}`)?.focus();
     }
   };
 
@@ -158,28 +243,47 @@ function LandingPage({ onLogin }) {
     if (enteredOtp.length < 6) return alert("Please enter the complete 6-digit OTP");
 
     setIsLoading(true);
+    setStatusMsg("");
     try {
-      if (confirmationResult) {
-        // Enforce Local Persistence for the session so `onAuthStateChanged` triggers cleanly
-        await setPersistence(auth, browserLocalPersistence);
-        
-        // Live Firebase verification
-        const result = await confirmationResult.confirm(enteredOtp);
-        const user = result.user;
+      if (!confirmationResult) throw new Error("Session expired. Please resend the OTP.");
 
-        // If it's a signup, we pass the setup data to the parent so it can be pushed to Firestore
-        setIsLoading(false);
-        if (authMode === "signup") {
-          onLogin(user, shopName, gst);
+      // Enforce Local Persistence so the session survives page refresh / device switch
+      await setPersistence(auth, browserLocalPersistence);
+
+      const result = await confirmationResult.confirm(enteredOtp);
+      const user = result.user;
+
+      // Check Firestore to see if this account already exists
+      const shopRef = doc(db, "shops", user.uid);
+      const shopSnap = await getDoc(shopRef);
+      const existingShopName = shopSnap.exists() ? shopSnap.data().shopName : null;
+
+      setIsLoading(false);
+
+      if (authMode === "signup") {
+        if (existingShopName) {
+          // Account already exists — log them in gracefully, don't overwrite
+          setStatusMsg(`✅ Welcome back, ${existingShopName}! Your account already exists.`);
+          setTimeout(() => onLogin(user), 1500);
         } else {
-          onLogin(user);
+          onLogin(user, shopName, gst);
         }
       } else {
-        throw new Error("Confirmation Result missing. Please resend the OTP.");
+        // Login mode
+        if (existingShopName) {
+          setStatusMsg(`✅ Welcome back, ${existingShopName}!`);
+          setTimeout(() => onLogin(user), 800);
+        } else {
+          // New number tried to login — create account for them
+          onLogin(user, phone + " Store", "");
+        }
       }
     } catch (error) {
       console.error("OTP Verification Error:", error);
-      alert("Invalid OTP Code. Please try again.");
+      let msg = "Invalid OTP Code. Please try again.";
+      if (error.code === "auth/code-expired") msg = "OTP expired. Please request a new one.";
+      else if (error.message && error.message.includes("Session expired")) msg = error.message;
+      alert(msg);
       setIsLoading(false);
     }
   };
@@ -259,16 +363,47 @@ function LandingPage({ onLogin }) {
               <form onSubmit={handleVerifyOtp} className="auth-form">
                 <div className="auth-input-group">
                   <label>Enter 6-Digit Verification Code</label>
-                  <p className="otp-subtitle">Sent to +91 {phone} <span onClick={() => setStep(1)} className="otp-edit">Edit</span></p>
+                  <p className="otp-subtitle">Sent to +91 {phone} <span onClick={() => { setStep(1); _clearRecaptcha(); setOtp(["","","","","",""]); }} className="otp-edit">Edit</span></p>
                   <div className="otp-inputs">
                     {otp.map((digit, index) => (
-                      <input key={index} id={`otp-${index}`} type="number" value={digit} onChange={(e) => handleOtpChange(index, e.target.value)} className="otp-digit" />
+                      <input
+                        key={index}
+                        id={`otp-${index}`}
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        maxLength={index === 0 ? 6 : 1}
+                        value={digit}
+                        onChange={(e) => handleOtpChange(index, e.target.value)}
+                        onKeyDown={(e) => handleOtpKeyDown(index, e)}
+                        className="otp-digit"
+                        autoFocus={index === 0}
+                        autoComplete={index === 0 ? "one-time-code" : "off"}
+                      />
                     ))}
                   </div>
+                  {statusMsg && (
+                    <div style={{ marginTop: 12, padding: "10px 14px", background: "rgba(16, 185, 129, 0.1)", border: "1px solid rgba(16, 185, 129, 0.3)", borderRadius: 8, fontSize: 13, color: "#10b981", textAlign: "center" }}>
+                      {statusMsg}
+                    </div>
+                  )}
                 </div>
                 <button type="submit" className="auth-button" disabled={isLoading || otp.join("").length < 6}>
                   {isLoading ? "Verifying..." : "Verify & Enter Dashboard"}
                 </button>
+                <div style={{ textAlign: "center", marginTop: 16, fontSize: 13, color: "#9ca3af" }}>
+                  Didn't receive the OTP?{" "}
+                  <span
+                    onClick={handleResendOtp}
+                    style={{
+                      color: resendCooldown > 0 ? "#4b5563" : "#f59e0b",
+                      cursor: resendCooldown > 0 ? "default" : "pointer",
+                      fontWeight: 600
+                    }}
+                  >
+                    {resendCooldown > 0 ? `Resend in ${resendCooldown}s` : "Resend OTP"}
+                  </span>
+                </div>
               </form>
             )}
             <div id="recaptcha-container"></div>
