@@ -19,6 +19,12 @@ const getLocalDateString = () => {
 // Initially null until Firebase Auth finishes loading
 let SHOP_ID = null;
 
+// Flag to suppress the onAuthStateChanged auto-redirect while handleVerifyOtp
+// is running its own Firestore check. Without this, Firebase signs the user in
+// during confirmationResult.confirm() which fires onAuthStateChanged immediately,
+// causing a redirect to the dashboard before we can verify the account exists.
+let isManuallyVerifying = false;
+
 const initialInventory = [
   { id: "t1", shopId: SHOP_ID, name: "Italian Marble", size: "2x4", shade: "Shade A", purchaseRate: 72, sellingRate: 95, stock: 73, unit: "box" },
   { id: "t2", shopId: SHOP_ID, name: "Italian Marble", size: "2x2", shade: "Shade B", purchaseRate: 58, sellingRate: 78, stock: 40, unit: "box" },
@@ -289,6 +295,10 @@ function LandingPage({ onLogin }) {
       // Enforce Local Persistence so the session survives page refresh / device switch
       await setPersistence(auth, browserLocalPersistence);
 
+      // Block the onAuthStateChanged listener from auto-redirecting while we
+      // do our own Firestore account-existence check below.
+      isManuallyVerifying = true;
+
       const result = await confirmationResult.confirm(enteredOtp);
       const user = result.user;
 
@@ -296,6 +306,9 @@ function LandingPage({ onLogin }) {
       const shopRef = doc(db, "shops", user.uid);
       const shopSnap = await getDoc(shopRef);
       const existingShopName = shopSnap.exists() ? shopSnap.data().shopName : null;
+
+      // Done with our check — release the listener guard
+      isManuallyVerifying = false;
 
       setIsLoading(false);
 
@@ -323,6 +336,8 @@ function LandingPage({ onLogin }) {
         }
       }
     } catch (error) {
+      // Always release the guard on error so the listener resumes normally
+      isManuallyVerifying = false;
       console.error("OTP Verification Error:", error);
       let msg = "Invalid OTP Code. Please try again.";
       if (error.code === "auth/code-expired") msg = "OTP expired. Please request a new one.";
@@ -718,6 +733,12 @@ export default function TilesApp() {
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
+      // If handleVerifyOtp is mid-flight doing its own Firestore check,
+      // skip the auto-redirect here — it will call setIsAuthenticated itself.
+      if (isManuallyVerifying) {
+        setIsAuthLoading(false);
+        return;
+      }
       if (user) {
         SHOP_ID = user.uid; // Dynamically set the global SHOP_ID to this user's unique Firebase auth ID
         setIsAuthenticated(true);
